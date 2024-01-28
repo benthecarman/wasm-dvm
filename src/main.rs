@@ -122,7 +122,7 @@ pub async fn handle_event(event: Event, client: Client) -> anyhow::Result<()> {
         .find_map(|t| {
             if t.kind() == TagKind::I {
                 let vec = t.as_vec();
-                if vec.len() == 3 && vec[2] == "url" {
+                if vec.len() == 2 || (vec.len() == 3 && vec[2] == "url") {
                     Some(vec[1].clone())
                 } else {
                     None
