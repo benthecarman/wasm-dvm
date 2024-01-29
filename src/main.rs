@@ -8,7 +8,8 @@ use reqwest::Url;
 use std::fs::File;
 use std::io::Cursor;
 use std::path::PathBuf;
-use wasmtime::{Engine, Instance, Module, Store};
+use wasmtime::{Engine, Linker, Module, Store};
+use wasmtime_wasi::sync::WasiCtxBuilder;
 
 mod config;
 
@@ -180,33 +181,27 @@ pub fn run_wasm(file_path: &PathBuf) -> anyhow::Result<i32> {
     // we parse the text format.
     let module = Module::from_file(&engine, file_path)?;
 
-    // A `Store` is what will own instances, functions, globals, etc. All wasm
-    // items are stored within a `Store`, and it's what we'll always be using to
-    // interact with the wasm world. Custom data can be stored in stores but for
-    // now we just use `()`.
-    let mut store = Store::new(&engine, ());
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::add_to_linker(&mut linker, |cx| cx)?;
 
-    // With a compiled `Module` we can then instantiate it, creating
-    // an `Instance` which we can actually poke at functions on.
-    let instance = Instance::new(&mut store, &module, &[])?;
+    // Configure and create a `WasiCtx`, which WASI functions need access to
+    // through the host state of the store (which in this case is the host state
+    // of the store)
+    let wasi_ctx = WasiCtxBuilder::new().inherit_stdio().build();
+    let mut store = Store::new(&engine, wasi_ctx);
 
-    // The `Instance` gives us access to various exported functions and items,
-    // which we access here to pull out our `run` exported function and
-    // run it.
-    let function = instance
-        .get_func(&mut store, "run")
-        .ok_or(anyhow::anyhow!("No run function"))?;
+    // Instantiate our module with the imports we've created, and run it.
+    // let instance = linker.instantiate(&mut store, &module)?;
 
-    // There's a few ways we can call the `run` `Func` value. The easiest
-    // is to statically assert its signature with `typed` (in this case
-    // asserting it takes no arguments and returns one i32) and then call it.
-    let typed = function.typed::<(), i32>(&store)?;
+    let func = linker
+        .module(&mut store, "", &module)?
+        .get_default(&mut store, "")?
+        .typed::<(), ()>(&store)?;
 
-    // And finally we can call our function! Note that the error propagation
-    // with `?` is done to handle the case where the wasm function traps.
-    let result = typed.call(&mut store, ())?;
+    // Invoke the WASI program default function.
+    let _ = func.call(&mut store, ())?;
 
-    Ok(result)
+    Ok(1)
 }
 
 #[cfg(test)]
