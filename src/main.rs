@@ -190,10 +190,8 @@ pub async fn download_and_run_wasm(
 pub fn run_wasm(file_path: &PathBuf, job_params: JobParams) -> anyhow::Result<String> {
     let wasm = Wasm::file(file_path);
     let manifest = Manifest::new([wasm]);
-    let mut plugin = Plugin::new(manifest, [], true).unwrap();
-    let res = plugin
-        .call::<&str, &str>(&job_params.function, &job_params.input)
-        .unwrap();
+    let mut plugin = Plugin::new(manifest, [], true)?;
+    let res = plugin.call::<&str, &str>(&job_params.function, &job_params.input)?;
 
     Ok(res.to_string())
 }
