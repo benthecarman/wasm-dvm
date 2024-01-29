@@ -30,8 +30,8 @@ async fn main() -> anyhow::Result<()> {
     let mut events = vec![];
     if server_keys.kind0.is_none() {
         let metadata = Metadata {
-            name: Some("Wasm DVM".to_string()),
-            display_name: Some("wasm_dvm".to_string()),
+            name: Some("wasm_dvm".to_string()),
+            display_name: Some("Wasm DVM".to_string()),
             picture: Some("https://camo.githubusercontent.com/df088e16e0c36ae3804306bdf1ec1f27b0953dc5986bce126b59502a33d8072d/68747470733a2f2f692e696d6775722e636f6d2f6d58626c5233392e706e67".to_string()),
             nip05: None,
             lud16: Some("wasm-dvm@zaps.benthecarman.com".to_string()),
@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     }
     if server_keys.kind31990.is_none() {
         let tags = vec![
-            Tag::Generic(TagKind::Custom("k".to_string()), vec!["5988".to_string()]),
+            Tag::Generic(TagKind::Custom("k".to_string()), vec!["5600".to_string()]),
             Tag::Generic(
                 TagKind::Custom("d".to_string()),
                 vec!["9b38e816e53e412a934b0c8ff3135875".to_string()],
