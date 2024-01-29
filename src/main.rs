@@ -1,17 +1,26 @@
-use crate::config::{Config, ServerKeys};
-use anyhow::anyhow;
-use clap::Parser;
-use log::{error, info};
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, Metadata, Tag, TagKind, Timestamp};
-use nostr_sdk::{Client, RelayPoolNotification};
-use reqwest::Url;
 use std::fs::File;
 use std::io::Cursor;
 use std::path::PathBuf;
-use wasmtime::{Engine, Linker, Module, Store};
-use wasmtime_wasi::sync::WasiCtxBuilder;
+
+use anyhow::anyhow;
+use clap::Parser;
+use extism::{Manifest, Plugin, Wasm};
+use log::{error, info};
+use nostr::{Event, EventBuilder, EventId, Filter, Keys, Kind, Metadata, Tag, TagKind, Timestamp};
+use nostr_sdk::{Client, RelayPoolNotification};
+use reqwest::Url;
+use serde::{Deserialize, Serialize};
+
+use crate::config::{Config, ServerKeys};
 
 mod config;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobParams {
+    pub url: String,
+    pub function: String,
+    pub input: String,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -118,13 +127,13 @@ pub async fn listener_loop(config: &Config, keys: Keys) -> anyhow::Result<()> {
 }
 
 pub async fn handle_event(event: Event, client: Client) -> anyhow::Result<()> {
-    let input = event
+    let string = event
         .tags
         .iter()
         .find_map(|t| {
             if t.kind() == TagKind::I {
                 let vec = t.as_vec();
-                if vec.len() == 2 || (vec.len() == 3 && vec[2] == "url") {
+                if vec.len() == 2 || (vec.len() == 3 && vec[2] == "text") {
                     Some(vec[1].clone())
                 } else {
                     None
@@ -135,9 +144,34 @@ pub async fn handle_event(event: Event, client: Client) -> anyhow::Result<()> {
         })
         .ok_or(anyhow!("Valid input tag not found: {event:?}"))?;
 
-    let url = Url::parse(&input)?;
+    let params: JobParams = serde_json::from_str(&string)?;
+
+    let result = download_and_run_wasm(params, event.id).await?;
+
+    let tags = vec![
+        Tag::public_key(event.pubkey),
+        Tag::event(event.id),
+        Tag::Generic(TagKind::I, vec![string]),
+        Tag::Request(event),
+        Tag::Amount {
+            millisats: 10_000_000, // 10k sats
+            bolt11: None,
+        },
+    ];
+    let builder = EventBuilder::new(Kind::JobResult(6988), result, tags);
+    let event_id = client.send_event_builder(builder).await?;
+    info!("Sent response: {event_id}");
+
+    Ok(())
+}
+
+pub async fn download_and_run_wasm(
+    job_params: JobParams,
+    event_id: EventId,
+) -> anyhow::Result<String> {
+    let url = Url::parse(&job_params.url)?;
     let temp_dir = tempfile::tempdir()?;
-    let file_path = temp_dir.path().join(format!("{}.wasm", event.id));
+    let file_path = temp_dir.path().join(format!("{event_id}.wasm"));
 
     let response = reqwest::get(url).await?;
 
@@ -149,83 +183,41 @@ pub async fn handle_event(event: Event, client: Client) -> anyhow::Result<()> {
         anyhow::bail!("Failed to download file: HTTP {}", response.status())
     };
 
-    // todo require payment
-
-    info!("Running wasm for event: {}", event.id);
-    let result = run_wasm(&file_path)?;
-
-    let tags = vec![
-        Tag::public_key(event.pubkey),
-        Tag::event(event.id),
-        Tag::Generic(TagKind::I, vec![input]),
-        Tag::Request(event),
-        Tag::Amount {
-            millisats: 10_000_000, // 10k sats
-            bolt11: None,
-        },
-    ];
-    let builder = EventBuilder::new(Kind::JobResult(6988), result.to_string(), tags);
-    let event_id = client.send_event_builder(builder).await?;
-    info!("Sent response: {event_id}");
-
-    Ok(())
+    info!("Running wasm for event: {event_id}");
+    run_wasm(&file_path, job_params)
 }
 
-pub fn run_wasm(file_path: &PathBuf) -> anyhow::Result<i32> {
-    // An engine stores and configures global compilation settings like
-    // optimization level, enabled wasm features, etc.
-    let engine = Engine::default();
+pub fn run_wasm(file_path: &PathBuf, job_params: JobParams) -> anyhow::Result<String> {
+    let wasm = Wasm::file(file_path);
+    let manifest = Manifest::new([wasm]);
+    let mut plugin = Plugin::new(manifest, [], true).unwrap();
+    let res = plugin
+        .call::<&str, &str>(&job_params.function, &job_params.input)
+        .unwrap();
 
-    // We start off by creating a `Module` which represents a compiled form
-    // of our input wasm module. In this case it'll be JIT-compiled after
-    // we parse the text format.
-    let module = Module::from_file(&engine, file_path)?;
-
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::add_to_linker(&mut linker, |cx| cx)?;
-
-    // Configure and create a `WasiCtx`, which WASI functions need access to
-    // through the host state of the store (which in this case is the host state
-    // of the store)
-    let wasi_ctx = WasiCtxBuilder::new().inherit_stdio().build();
-    let mut store = Store::new(&engine, wasi_ctx);
-
-    // Instantiate our module with the imports we've created, and run it.
-    // let instance = linker.instantiate(&mut store, &module)?;
-
-    let func = linker
-        .module(&mut store, "", &module)?
-        .get_default(&mut store, "")?
-        .typed::<(), ()>(&store)?;
-
-    // Invoke the WASI program default function.
-    let _ = func.call(&mut store, ())?;
-
-    Ok(1)
+    Ok(res.to_string())
 }
 
 #[cfg(test)]
 mod test {
-    use crate::run_wasm;
-    use nostr::Timestamp;
+    use crate::{download_and_run_wasm, JobParams};
+    use nostr::EventId;
 
-    #[test]
-    fn test_wasm_runner() {
-        let wasm = r#"
-(module
-  (func (export "run") (result i32)
-     i32.const 42
-  )
-)"#;
-        let temp_dir = tempfile::tempdir().unwrap();
-        let file_path = temp_dir.path().join(format!(
-            "test_wasm_runner-{}.wasm",
-            Timestamp::now().as_u64()
-        ));
-        std::fs::write(&file_path, wasm).unwrap();
+    #[tokio::test]
+    async fn test_wasm_runner() {
+        let params = JobParams {
+            url: "https://github.com/extism/plugins/releases/download/v0.5.0/count_vowels.wasm"
+                .to_string(),
+            function: "count_vowels".to_string(),
+            input: "Hello World".to_string(),
+        };
+        let result = download_and_run_wasm(params, EventId::all_zeros())
+            .await
+            .unwrap();
 
-        let result = run_wasm(&file_path).unwrap();
-
-        assert_eq!(result, 42);
+        assert_eq!(
+            result,
+            "{\"count\":3,\"total\":3,\"vowels\":\"aeiouAEIOU\"}"
+        );
     }
 }
