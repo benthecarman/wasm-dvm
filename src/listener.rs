@@ -15,7 +15,7 @@ pub async fn listener_loop(
     client.connect().await;
 
     let filter = Filter::new()
-        .kind(Kind::JobRequest(5988))
+        .kind(Kind::JobRequest(5600))
         .since(Timestamp::now());
 
     client.subscribe(vec![filter]).await;
@@ -25,7 +25,7 @@ pub async fn listener_loop(
     while let Ok(msg) = notifications.recv().await {
         match msg {
             RelayPoolNotification::Event { event, .. } => {
-                if event.kind == Kind::JobRequest(5988) {
+                if event.kind == Kind::JobRequest(5600) {
                     // spawn thread to handle event
                     let client = client.clone();
                     let http = http.clone();
@@ -82,7 +82,7 @@ pub async fn handle_event(
             bolt11: None,
         },
     ];
-    let builder = EventBuilder::new(Kind::JobResult(6988), result, tags);
+    let builder = EventBuilder::new(Kind::JobResult(6600), result, tags);
     let event_id = client.send_event_builder(builder).await?;
     info!("Sent response: {event_id}");
 
