@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     loop {
+        info!("Starting listener");
         if let Err(e) = listener_loop(&config, keys.clone()).await {
             error!("Error in loop: {e}");
         }
@@ -149,6 +150,7 @@ pub async fn handle_event(event: Event, client: Client) -> anyhow::Result<()> {
 
     // todo require payment
 
+    info!("Running wasm for event: {}", event.id);
     let result = run_wasm(&file_path)?;
 
     let tags = vec![
