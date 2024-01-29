@@ -2,7 +2,7 @@ use crate::config::{Config, ServerKeys};
 use crate::listener::listener_loop;
 use clap::Parser;
 use log::{error, info};
-use nostr::{EventBuilder, Kind, Metadata, Tag, TagKind};
+use nostr::{EventBuilder, Kind, Metadata, Tag, TagKind, ToBech32};
 use nostr_sdk::Client;
 use std::path::PathBuf;
 
@@ -70,9 +70,10 @@ async fn main() -> anyhow::Result<()> {
         server_keys.write(&keys_path);
     }
 
+    let bech32 = keys.public_key().to_bech32()?;
     let http = reqwest::Client::new();
     loop {
-        info!("Starting listener");
+        info!("Starting listen with key: {bech32}");
         if let Err(e) = listener_loop(&config, keys.clone(), http.clone()).await {
             error!("Error in loop: {e}");
         }
