@@ -17,6 +17,8 @@ use crate::config::{Config, ServerKeys};
 
 mod config;
 
+const MAX_WASM_FILE_SIZE: u64 = 25_000_000; // 25mb
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobParams {
     pub url: String,
@@ -85,15 +87,20 @@ async fn main() -> anyhow::Result<()> {
         server_keys.write(&keys_path);
     }
 
+    let http = reqwest::Client::new();
     loop {
         info!("Starting listener");
-        if let Err(e) = listener_loop(&config, keys.clone()).await {
+        if let Err(e) = listener_loop(&config, keys.clone(), http.clone()).await {
             error!("Error in loop: {e}");
         }
     }
 }
 
-pub async fn listener_loop(config: &Config, keys: Keys) -> anyhow::Result<()> {
+pub async fn listener_loop(
+    config: &Config,
+    keys: Keys,
+    http: reqwest::Client,
+) -> anyhow::Result<()> {
     let client = Client::new(keys);
     client.add_relays(config.relay.clone()).await?;
     client.connect().await;
@@ -112,8 +119,9 @@ pub async fn listener_loop(config: &Config, keys: Keys) -> anyhow::Result<()> {
                 if event.kind == Kind::JobRequest(5988) {
                     // spawn thread to handle event
                     let client = client.clone();
+                    let http = http.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_event(event, client).await {
+                        if let Err(e) = handle_event(event, client, http).await {
                             error!("Error handling event: {e}");
                         }
                     });
@@ -129,7 +137,11 @@ pub async fn listener_loop(config: &Config, keys: Keys) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn handle_event(event: Event, client: Client) -> anyhow::Result<()> {
+pub async fn handle_event(
+    event: Event,
+    client: Client,
+    http: reqwest::Client,
+) -> anyhow::Result<()> {
     let string = event
         .tags
         .iter()
@@ -149,7 +161,7 @@ pub async fn handle_event(event: Event, client: Client) -> anyhow::Result<()> {
 
     let params: JobParams = serde_json::from_str(&string)?;
 
-    let result = download_and_run_wasm(params, event.id).await?;
+    let result = download_and_run_wasm(params, event.id, http).await?;
 
     let tags = vec![
         Tag::public_key(event.pubkey),
@@ -171,17 +183,28 @@ pub async fn handle_event(event: Event, client: Client) -> anyhow::Result<()> {
 pub async fn download_and_run_wasm(
     job_params: JobParams,
     event_id: EventId,
+    http: reqwest::Client,
 ) -> anyhow::Result<String> {
     let url = Url::parse(&job_params.url)?;
     let temp_dir = tempfile::tempdir()?;
     let file_path = temp_dir.path().join(format!("{event_id}.wasm"));
 
-    // todo create reqwest client
-    let response = reqwest::get(url).await?;
+    let response = http.get(url).send().await?;
 
     if response.status().is_success() {
+        // if length larger than 25mb, error
+        if response.content_length().unwrap_or(0) > MAX_WASM_FILE_SIZE {
+            anyhow::bail!("File too large");
+        }
+
         let mut dest = File::create(&file_path)?;
-        let mut content = Cursor::new(response.bytes().await?);
+
+        let bytes = response.bytes().await?;
+        if bytes.len() as u64 > MAX_WASM_FILE_SIZE {
+            anyhow::bail!("File too large");
+        }
+        let mut content = Cursor::new(bytes);
+
         std::io::copy(&mut content, &mut dest)?;
     } else {
         anyhow::bail!("Failed to download file: HTTP {}", response.status())
@@ -231,7 +254,7 @@ mod test {
             input: "Hello World".to_string(),
             time: 5,
         };
-        let result = download_and_run_wasm(params, EventId::all_zeros())
+        let result = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new())
             .await
             .unwrap();
 
@@ -249,7 +272,7 @@ mod test {
             input: "{\"url\":\"https://benthecarman.com/.well-known/nostr.json\"}".to_string(), // get my nip05
             time: 5,
         };
-        let result = download_and_run_wasm(params, EventId::all_zeros())
+        let result = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new())
             .await
             .unwrap();
 
@@ -267,7 +290,7 @@ mod test {
             input: "".to_string(),
             time: 1,
         };
-        let err = download_and_run_wasm(params, EventId::all_zeros()).await;
+        let err = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new()).await;
 
         assert!(err.is_err());
         assert_eq!(err.unwrap_err().to_string(), "Timeout");
