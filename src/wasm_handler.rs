@@ -66,7 +66,7 @@ pub async fn run_wasm(file_path: PathBuf, job_params: JobParams) -> anyhow::Resu
             .map(|x| x.to_string())
     });
 
-    let sleep = tokio::time::sleep(Duration::from_secs(job_params.time));
+    let sleep = tokio::time::sleep(Duration::from_millis(job_params.time));
 
     select! {
         result = fut => {
@@ -92,7 +92,7 @@ mod test {
                 .to_string(),
             function: "count_vowels".to_string(),
             input: "Hello World".to_string(),
-            time: 5,
+            time: 500,
         };
         let result = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new())
             .await
@@ -110,7 +110,7 @@ mod test {
             url: "https://github.com/extism/plugins/releases/download/v0.5.0/http.wasm".to_string(),
             function: "http_get".to_string(),
             input: "{\"url\":\"https://benthecarman.com/.well-known/nostr.json\"}".to_string(), // get my nip05
-            time: 5,
+            time: 5_000,
         };
         let result = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new())
             .await
@@ -128,7 +128,7 @@ mod test {
                 .to_string(),
             function: "loop_forever".to_string(),
             input: "".to_string(),
-            time: 1,
+            time: 1_000,
         };
         let err = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new()).await;
 
