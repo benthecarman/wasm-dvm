@@ -4,8 +4,10 @@ use log::info;
 use nostr::EventId;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::Cursor;
+use std::io;
+use std::io::{Cursor, Seek};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::select;
@@ -18,6 +20,7 @@ pub struct JobParams {
     pub function: String,
     pub input: String,
     pub time: u64,
+    pub checksum: String,
 }
 
 pub async fn download_and_run_wasm(
@@ -45,7 +48,21 @@ pub async fn download_and_run_wasm(
         }
         let mut content = Cursor::new(bytes);
 
-        std::io::copy(&mut content, &mut dest)?;
+        let mut hasher = Sha256::new();
+        io::copy(&mut content, &mut hasher)?;
+        let result = hasher.finalize();
+        let hex_result = format!("{result:x}");
+        if job_params.checksum.to_lowercase() != hex_result {
+            std::fs::remove_file(&file_path)?;
+            anyhow::bail!(
+                "Checksum mismatch expected: {} got: {hex_result}",
+                job_params.checksum
+            );
+        }
+
+        // write the file to disk
+        content.rewind()?;
+        io::copy(&mut content, &mut dest)?;
     } else {
         anyhow::bail!("Failed to download file: HTTP {}", response.status())
     };
@@ -93,6 +110,8 @@ mod test {
             function: "count_vowels".to_string(),
             input: "Hello World".to_string(),
             time: 500,
+            checksum: "93898457953d30d016f712ccf4336ce7e9971db5f7f3aff1edd252764f75d5d7"
+                .to_string(),
         };
         let result = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new())
             .await
@@ -111,6 +130,8 @@ mod test {
             function: "http_get".to_string(),
             input: "{\"url\":\"https://benthecarman.com/.well-known/nostr.json\"}".to_string(), // get my nip05
             time: 5_000,
+            checksum: "fe7ff8aaf45d67dd0d6b9fdfe3aa871e658a83adcf19c8f016013c29e8857f03"
+                .to_string(),
         };
         let result = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new())
             .await
@@ -129,6 +150,8 @@ mod test {
             function: "loop_forever".to_string(),
             input: "".to_string(),
             time: 1_000,
+            checksum: "6e6386b9194f2298b5e55e88c25fe66dda454f0e2604da6964735ab1c554b513"
+                .to_string(),
         };
         let err = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new()).await;
 
