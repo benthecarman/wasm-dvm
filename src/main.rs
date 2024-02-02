@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
 
     let lnd = client.lightning().clone();
 
-    println!("Connected to LND: {}", lnd_info.identity_pubkey);
+    info!("Connected to LND: {}", lnd_info.identity_pubkey);
 
     let invoice_lnd = lnd.clone();
     let invoice_relays = config.relay.clone();

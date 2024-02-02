@@ -17,7 +17,7 @@ pub async fn start_invoice_subscription(
     http: reqwest::Client,
     db_pool: Pool<ConnectionManager<PgConnection>>,
 ) -> anyhow::Result<()> {
-    println!("Starting invoice subscription");
+    info!("Starting invoice subscription");
 
     let sub = lnrpc::InvoiceSubscription::default();
     let mut invoice_stream = lnd
