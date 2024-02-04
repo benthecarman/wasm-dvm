@@ -1,5 +1,7 @@
 use crate::config::Config;
-use crate::models::Job;
+use crate::invoice_subscriber::run_job_request;
+use crate::models::job::Job;
+use crate::models::zap_balance::ZapBalance;
 use crate::wasm_handler::JobParams;
 use anyhow::anyhow;
 use diesel::r2d2::{ConnectionManager, Pool};
@@ -17,6 +19,7 @@ pub async fn listen_for_jobs(
     keys: Keys,
     lnd: LndLightningClient,
     db_pool: Pool<ConnectionManager<PgConnection>>,
+    http: reqwest::Client,
 ) -> anyhow::Result<()> {
     let client = Client::new(keys);
     client.add_relays(config.relay.clone()).await?;
@@ -38,8 +41,9 @@ pub async fn listen_for_jobs(
                     let client = client.clone();
                     let lnd = lnd.clone();
                     let db = db_pool.clone();
+                    let http = http.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_event(event, client, lnd, db).await {
+                        if let Err(e) = handle_event(event, client, lnd, db, &http).await {
                             error!("Error handling event: {e}");
                         }
                     });
@@ -62,6 +66,7 @@ pub async fn handle_event(
     client: Client,
     mut lnd: LndLightningClient,
     db_pool: Pool<ConnectionManager<PgConnection>>,
+    http: &reqwest::Client,
 ) -> anyhow::Result<()> {
     let (params, _) = get_job_params(&event)?;
 
@@ -82,6 +87,37 @@ pub async fn handle_event(
     // 1 sat per millisecond
     let value_msat = params.time * 1_000;
 
+    let mut conn = db_pool.get()?;
+    let balance = ZapBalance::get(&mut conn, &event.pubkey)?;
+
+    let builder = match balance {
+        Some(b) => {
+            if (b.balance_msats as u64) < value_msat {
+                create_job_feedback_invoice(&event, value_msat, &mut lnd, &mut conn).await?
+            } else {
+                // deduct balance
+                let amt = value_msat as i32;
+                b.update_balance(&mut conn, -amt)?;
+
+                // run job
+                run_job_request(event, http).await?
+            }
+        }
+        None => create_job_feedback_invoice(&event, value_msat, &mut lnd, &mut conn).await?,
+    };
+
+    let event_id = client.send_event_builder(builder).await?;
+    info!("Sent response: {event_id}");
+
+    Ok(())
+}
+
+async fn create_job_feedback_invoice(
+    event: &Event,
+    value_msat: u64,
+    lnd: &mut LndLightningClient,
+    conn: &mut PgConnection,
+) -> anyhow::Result<EventBuilder> {
     let request = lnrpc::Invoice {
         value_msat: value_msat as i64,
         memo: "Wasm DVM Request".to_string(),
@@ -94,22 +130,17 @@ pub async fn handle_event(
 
     debug!("Created invoice: {bolt11}");
 
-    let mut conn = db_pool.get()?;
-    Job::create(&mut conn, invoice.payment_hash().into_32(), &event)?;
-    drop(conn);
+    Job::create(conn, invoice.payment_hash().into_32(), event)?;
 
     let builder = EventBuilder::job_feedback(
-        &event,
+        event,
         DataVendingMachineStatus::PaymentRequired,
         None,
         value_msat,
         Some(bolt11),
         None,
     );
-    let event_id = client.send_event_builder(builder).await?;
-    info!("Sent response: {event_id}");
-
-    Ok(())
+    Ok(builder)
 }
 
 pub fn get_job_params(event: &Event) -> anyhow::Result<(JobParams, String)> {

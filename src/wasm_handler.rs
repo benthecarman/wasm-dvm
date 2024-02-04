@@ -26,7 +26,7 @@ pub struct JobParams {
 pub async fn download_and_run_wasm(
     job_params: JobParams,
     event_id: EventId,
-    http: reqwest::Client,
+    http: &reqwest::Client,
 ) -> anyhow::Result<String> {
     let url = Url::parse(&job_params.url)?;
     let temp_dir = tempfile::tempdir()?;
@@ -113,7 +113,7 @@ mod test {
             checksum: "93898457953d30d016f712ccf4336ce7e9971db5f7f3aff1edd252764f75d5d7"
                 .to_string(),
         };
-        let result = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new())
+        let result = download_and_run_wasm(params, EventId::all_zeros(), &reqwest::Client::new())
             .await
             .unwrap();
 
@@ -133,7 +133,7 @@ mod test {
             checksum: "fe7ff8aaf45d67dd0d6b9fdfe3aa871e658a83adcf19c8f016013c29e8857f03"
                 .to_string(),
         };
-        let result = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new())
+        let result = download_and_run_wasm(params, EventId::all_zeros(), &reqwest::Client::new())
             .await
             .unwrap();
 
@@ -153,7 +153,8 @@ mod test {
             checksum: "6e6386b9194f2298b5e55e88c25fe66dda454f0e2604da6964735ab1c554b513"
                 .to_string(),
         };
-        let err = download_and_run_wasm(params, EventId::all_zeros(), reqwest::Client::new()).await;
+        let err =
+            download_and_run_wasm(params, EventId::all_zeros(), &reqwest::Client::new()).await;
 
         assert!(err.is_err());
         assert_eq!(err.unwrap_err().to_string(), "Timeout");

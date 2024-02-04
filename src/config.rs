@@ -35,6 +35,15 @@ pub struct Config {
     /// Path to admin.macaroon file for lnd
     #[clap(long)]
     macaroon_file: Option<String>,
+    /// The domain name you are running the lnurl server on
+    #[clap(default_value_t = String::from("localhost:3000"), long)]
+    pub domain: String,
+    #[clap(default_value_t = String::from("0.0.0.0"), long)]
+    /// Bind address for webserver
+    pub bind: String,
+    #[clap(default_value_t = 3000, long)]
+    /// Port for webserver
+    pub port: u16,
 }
 
 impl Config {

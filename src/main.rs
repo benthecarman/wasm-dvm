@@ -1,22 +1,37 @@
 use crate::config::{Config, ServerKeys};
 use crate::job_listener::listen_for_jobs;
 use crate::models::MIGRATIONS;
+use crate::routes::{get_invoice, get_lnurl_pay};
+use axum::http::{Method, StatusCode, Uri};
+use axum::routing::get;
+use axum::{http, Extension, Router};
 use clap::Parser;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
 use diesel_migrations::MigrationHarness;
 use log::{error, info};
-use nostr::{EventBuilder, Kind, Metadata, Tag, TagKind, ToBech32};
+use nostr::{EventBuilder, Keys, Kind, Metadata, Tag, TagKind, ToBech32};
 use nostr_sdk::Client;
 use std::path::PathBuf;
 use tokio::spawn;
 use tonic_openssl_lnd::lnrpc::{GetInfoRequest, GetInfoResponse};
+use tonic_openssl_lnd::LndLightningClient;
+use tower_http::cors::{Any, CorsLayer};
 
 mod config;
 mod invoice_subscriber;
 mod job_listener;
 mod models;
+mod routes;
 mod wasm_handler;
+
+#[derive(Clone)]
+pub struct State {
+    pub db_pool: Pool<ConnectionManager<PgConnection>>,
+    pub lnd: LndLightningClient,
+    pub keys: Keys,
+    pub domain: String,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -113,18 +128,20 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Connected to LND: {}", lnd_info.identity_pubkey);
 
+    let http = reqwest::Client::new();
+
     let invoice_lnd = lnd.clone();
     let invoice_relays = config.relay.clone();
     let invoice_keys = keys.clone();
     let invoice_db_pool = db_pool.clone();
-    let http = reqwest::Client::new();
+    let invoice_http = http.clone();
     spawn(async move {
         loop {
             if let Err(e) = invoice_subscriber::start_invoice_subscription(
                 invoice_lnd.clone(),
                 invoice_relays.clone(),
                 invoice_keys.clone(),
-                http.clone(),
+                invoice_http.clone(),
                 invoice_db_pool.clone(),
             )
             .await
@@ -135,10 +152,68 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let bech32 = keys.public_key().to_bech32()?;
-    loop {
-        info!("Starting listen with key: {bech32}");
-        if let Err(e) = listen_for_jobs(&config, keys.clone(), lnd.clone(), db_pool.clone()).await {
-            error!("Error in loop: {e}");
+    let jobs_config = config.clone();
+    let jobs_keys = keys.clone();
+    let jobs_lnd = lnd.clone();
+    let jobs_db_pool = db_pool.clone();
+    spawn(async move {
+        loop {
+            info!("Starting listen with key: {bech32}");
+            if let Err(e) = listen_for_jobs(
+                &jobs_config,
+                jobs_keys.clone(),
+                jobs_lnd.clone(),
+                jobs_db_pool.clone(),
+                http.clone(),
+            )
+            .await
+            {
+                error!("Error in loop: {e}");
+            }
         }
+    });
+
+    let state = State {
+        db_pool,
+        lnd,
+        keys,
+        domain: config.domain.clone(),
+    };
+
+    let addr: std::net::SocketAddr = format!("{}:{}", config.bind, config.port)
+        .parse()
+        .expect("Failed to parse bind/port for webserver");
+
+    println!("Webserver running on http://{}", addr);
+
+    let server_router = Router::new()
+        .route("/get-invoice/:hash", get(get_invoice))
+        .route("/.well-known/lnurlp/:name", get(get_lnurl_pay))
+        .fallback(fallback)
+        .layer(Extension(state.clone()))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_headers(vec![http::header::CONTENT_TYPE])
+                .allow_methods([Method::GET, Method::POST]),
+        );
+
+    let server = axum::Server::bind(&addr).serve(server_router.into_make_service());
+
+    let graceful = server.with_graceful_shutdown(async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to create Ctrl+C shutdown signal");
+    });
+
+    // Await the server to receive the shutdown signal
+    if let Err(e) = graceful.await {
+        error!("shutdown error: {}", e);
     }
+
+    Ok(())
+}
+
+async fn fallback(uri: Uri) -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, format!("No route for {}", uri))
 }

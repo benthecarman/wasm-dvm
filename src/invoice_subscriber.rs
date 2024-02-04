@@ -1,10 +1,19 @@
 use crate::job_listener::get_job_params;
-use crate::models::Job;
+use crate::models::job::Job;
+use crate::models::mark_zap_paid;
+use crate::models::zap::Zap;
 use crate::wasm_handler::download_and_run_wasm;
+use bitcoin::hashes::sha256;
+use bitcoin::hashes::Hash;
+use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1::rand::rngs::OsRng;
+use bitcoin::secp256k1::rand::RngCore;
+use bitcoin::secp256k1::SecretKey;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
+use lightning_invoice::{Currency, InvoiceBuilder, PaymentSecret};
 use log::{error, info};
-use nostr::{EventBuilder, Keys, Kind, Tag, TagKind};
+use nostr::{Event, EventBuilder, Keys, Kind, Tag, TagKind, ToBech32};
 use nostr_sdk::Client;
 use tonic_openssl_lnd::lnrpc::invoice::InvoiceState;
 use tonic_openssl_lnd::lnrpc::Invoice;
@@ -66,14 +75,26 @@ pub async fn handle_invoice(
     db_pool: Pool<ConnectionManager<PgConnection>>,
 ) -> anyhow::Result<()> {
     let mut conn = db_pool.get()?;
-    let job = Job::get_by_payment_hash(&mut conn, ln_invoice.r_hash)?;
+    let job = Job::get_by_payment_hash(&mut conn, &ln_invoice.r_hash)?;
 
     if job.is_none() {
-        return Ok(());
+        // if it is not a job, try to handle it as a zap
+        return handle_paid_zap(&mut conn, ln_invoice.r_hash, client).await;
     }
     let job = job.unwrap();
 
     let event = job.request();
+    let builder = run_job_request(event, &http).await?;
+
+    let event_id = client.send_event_builder(builder).await?;
+    info!("Sent response: {event_id}");
+
+    Job::set_response_id(&mut conn, job.id, event_id)?;
+
+    Ok(())
+}
+
+pub async fn run_job_request(event: Event, http: &reqwest::Client) -> anyhow::Result<EventBuilder> {
     let (params, string) = get_job_params(&event).expect("must have valid params");
 
     let result = download_and_run_wasm(params, event.id, http).await?;
@@ -84,11 +105,64 @@ pub async fn handle_invoice(
         Tag::Generic(TagKind::I, vec![string]),
         Tag::Request(event),
     ];
-    let builder = EventBuilder::new(Kind::JobResult(6600), result, tags);
-    let event_id = client.send_event_builder(builder).await?;
-    info!("Sent response: {event_id}");
+    Ok(EventBuilder::new(Kind::JobResult(6600), result, tags))
+}
 
-    Job::set_response_id(&mut conn, job.id, event_id)?;
+async fn handle_paid_zap(
+    conn: &mut PgConnection,
+    payment_hash: Vec<u8>,
+    client: Client,
+) -> anyhow::Result<()> {
+    match Zap::find_by_payment_hash(conn, &payment_hash)? {
+        None => Ok(()),
+        Some(zap) => {
+            if zap.note_id.is_some() {
+                return Ok(());
+            }
 
-    Ok(())
+            let invoice = zap.invoice();
+
+            let preimage = &mut [0u8; 32];
+            OsRng.fill_bytes(preimage);
+            let invoice_hash = sha256::Hash::hash(preimage);
+
+            let payment_secret = &mut [0u8; 32];
+            OsRng.fill_bytes(payment_secret);
+
+            let priv_key_bytes = &mut [0u8; 32];
+            OsRng.fill_bytes(priv_key_bytes);
+            let private_key = SecretKey::from_slice(priv_key_bytes)?;
+
+            let amt_msats = invoice
+                .amount_milli_satoshis()
+                .expect("Invoice must have an amount");
+
+            let fake_invoice = InvoiceBuilder::new(Currency::Bitcoin)
+                .amount_milli_satoshis(amt_msats)
+                .invoice_description(invoice.description())
+                .current_timestamp()
+                .payment_hash(invoice_hash)
+                .payment_secret(PaymentSecret(*payment_secret))
+                .min_final_cltv_expiry_delta(144)
+                .basic_mpp()
+                .build_signed(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))?;
+
+            let event = EventBuilder::zap_receipt(
+                fake_invoice.to_string(),
+                Some(hex::encode(preimage)),
+                zap.request(),
+            );
+
+            let event_id = client.send_event_builder(event).await?;
+
+            println!(
+                "Broadcasted zap event id: {}!",
+                event_id.to_bech32().expect("bech32")
+            );
+
+            mark_zap_paid(conn, payment_hash, event_id)?;
+
+            Ok(())
+        }
+    }
 }
