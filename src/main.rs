@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
             display_name: Some("Wasm DVM".to_string()),
             picture: Some("https://camo.githubusercontent.com/df088e16e0c36ae3804306bdf1ec1f27b0953dc5986bce126b59502a33d8072d/68747470733a2f2f692e696d6775722e636f6d2f6d58626c5233392e706e67".to_string()),
             nip05: None,
-            lud16: Some("wasm-dvm@zaps.benthecarman.com".to_string()),
+            lud16: Some(format!("wasm-dvm@{}", config.domain)),
             ..Default::default()
         };
         let event = EventBuilder::metadata(&metadata).to_event(&keys)?;
