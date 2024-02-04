@@ -13,6 +13,7 @@ use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
 use lightning_invoice::{Currency, InvoiceBuilder, PaymentSecret};
 use log::{error, info};
+use nostr::prelude::DataVendingMachineStatus;
 use nostr::{Event, EventBuilder, Keys, Kind, Tag, TagKind, ToBech32};
 use nostr_sdk::Client;
 use tonic_openssl_lnd::lnrpc::invoice::InvoiceState;
@@ -87,7 +88,7 @@ pub async fn handle_invoice(
 
     let event = job.request();
     let (params, input) = get_job_params(&event, keys).expect("must have valid params");
-    let builder = run_job_request(event, params, input, &http).await?;
+    let builder = run_job_request(event, params, input, &http).await;
 
     let event_id = client.send_event_builder(builder).await?;
     info!("Sent response: {event_id}");
@@ -102,16 +103,29 @@ pub async fn run_job_request(
     params: JobParams,
     input: String,
     http: &reqwest::Client,
-) -> anyhow::Result<EventBuilder> {
-    let result = download_and_run_wasm(params, event.id, http).await?;
-
-    let tags = vec![
-        Tag::public_key(event.pubkey),
-        Tag::event(event.id),
-        Tag::Generic(TagKind::I, vec![input]),
-        Tag::Request(event),
-    ];
-    Ok(EventBuilder::new(Kind::JobResult(6600), result, tags))
+) -> EventBuilder {
+    match download_and_run_wasm(params, event.id, http).await {
+        Ok(result) => {
+            let tags = vec![
+                Tag::public_key(event.pubkey),
+                Tag::event(event.id),
+                Tag::Generic(TagKind::I, vec![input]),
+                Tag::Request(event),
+            ];
+            EventBuilder::new(Kind::JobResult(6600), result, tags)
+        }
+        Err(e) => {
+            error!("Error running event {}: {e}", event.id);
+            EventBuilder::job_feedback(
+                &event,
+                DataVendingMachineStatus::Error,
+                Some(e.to_string()),
+                0,
+                None,
+                None,
+            )
+        }
+    }
 }
 
 async fn handle_paid_zap(
