@@ -1,7 +1,7 @@
 use crate::config::{Config, ServerKeys};
 use crate::job_listener::listen_for_jobs;
 use crate::models::MIGRATIONS;
-use crate::routes::{get_invoice, get_lnurl_pay};
+use crate::routes::{get_invoice, get_lnurl_pay, get_nip05};
 use axum::http::{Method, StatusCode, Uri};
 use axum::routing::get;
 use axum::{http, Extension, Router};
@@ -32,6 +32,7 @@ pub struct State {
     pub db_pool: Pool<ConnectionManager<PgConnection>>,
     pub lnd: LndLightningClient,
     pub keys: Keys,
+    pub relays: Vec<String>,
     pub domain: String,
 }
 
@@ -72,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
             name: Some("wasm_dvm".to_string()),
             display_name: Some("Wasm DVM".to_string()),
             picture: Some("https://camo.githubusercontent.com/df088e16e0c36ae3804306bdf1ec1f27b0953dc5986bce126b59502a33d8072d/68747470733a2f2f692e696d6775722e636f6d2f6d58626c5233392e706e67".to_string()),
-            nip05: None,
+            nip05: Some(format!("_@{}", config.domain)),
             lud16: Some(format!("wasm-dvm@{}", config.domain)),
             ..Default::default()
         };
@@ -179,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
         db_pool,
         lnd,
         keys,
+        relays: config.relay.clone(),
         domain: config.domain.clone(),
     };
 
@@ -191,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
     let server_router = Router::new()
         .route("/get-invoice/:hash", get(get_invoice))
         .route("/.well-known/lnurlp/:name", get(get_lnurl_pay))
+        .route("/.well-known/nostr.json", get(get_nip05))
         .fallback(fallback)
         .layer(Extension(state.clone()))
         .layer(

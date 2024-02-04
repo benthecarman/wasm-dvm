@@ -122,6 +122,22 @@ pub async fn get_lnurl_pay(
     Ok(Json(resp))
 }
 
+pub async fn get_nip05(
+    Extension(state): Extension<State>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let npub = state.keys.public_key().to_string();
+    let json = json!({
+    "names": {
+        "_": npub,
+      },
+    "relays": {
+        npub: state.relays,
+      },
+    });
+
+    Ok(Json(json))
+}
+
 pub(crate) fn handle_anyhow_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
     let err = json!({
         "status": "ERROR",
