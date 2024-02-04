@@ -129,13 +129,18 @@ async fn handle_paid_zap(
             let payment_secret = &mut [0u8; 32];
             OsRng.fill_bytes(payment_secret);
 
-            let priv_key_bytes = &mut [0u8; 32];
-            OsRng.fill_bytes(priv_key_bytes);
-            let private_key = SecretKey::from_slice(priv_key_bytes)?;
+            let private_key = SecretKey::new(&mut OsRng);
 
             let amt_msats = invoice
                 .amount_milli_satoshis()
                 .expect("Invoice must have an amount");
+
+            let zap_request = zap.request();
+
+            info!(
+                "Received zap for {amt_msats} msats from {}!",
+                zap_request.pubkey.to_bech32()?
+            );
 
             let fake_invoice = InvoiceBuilder::new(Currency::Bitcoin)
                 .amount_milli_satoshis(amt_msats)
@@ -150,7 +155,7 @@ async fn handle_paid_zap(
             let event = EventBuilder::zap_receipt(
                 fake_invoice.to_string(),
                 Some(hex::encode(preimage)),
-                zap.request(),
+                zap_request,
             );
 
             let event_id = client.send_event_builder(event).await?;

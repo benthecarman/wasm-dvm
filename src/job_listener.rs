@@ -91,10 +91,13 @@ pub async fn handle_event(
     let balance = ZapBalance::get(&mut conn, &event.pubkey)?;
 
     let builder = match balance {
-        Some(b) => {
+        Some(mut b) => {
             if (b.balance_msats as u64) < value_msat {
                 create_job_feedback_invoice(&event, value_msat, &mut lnd, &mut conn).await?
             } else {
+                info!(
+                    "User has enough balance, deducting {value_msat}msats from balance and running job"
+                );
                 // deduct balance
                 let amt = value_msat as i32;
                 b.update_balance(&mut conn, -amt)?;

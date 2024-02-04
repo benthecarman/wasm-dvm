@@ -106,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         client.connect().await;
         client.batch_event(events, Default::default()).await?;
         client.disconnect().await?;
+        info!("Broadcasted metadata events");
         // write to storage
         server_keys.write(&keys_path);
     }

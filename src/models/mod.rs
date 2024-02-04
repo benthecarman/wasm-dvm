@@ -3,7 +3,8 @@ use crate::models::zap_balance::ZapBalance;
 use diesel::{Connection, PgConnection};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations};
 use lightning_invoice::Bolt11Invoice;
-use nostr::{Event, EventId};
+use log::info;
+use nostr::{Event, EventId, ToBech32};
 
 pub mod job;
 mod schema;
@@ -34,9 +35,15 @@ pub fn mark_zap_paid(
 ) -> anyhow::Result<()> {
     conn.transaction(|conn| {
         let zap = Zap::update_note_id(conn, payment_hash, note_id)?;
-        let bal = ZapBalance::get(conn, &zap.npub())?;
-        if let Some(bal) = bal {
+        let npub = zap.npub();
+        let bal = ZapBalance::get(conn, &npub)?;
+        if let Some(mut bal) = bal {
             bal.update_balance(conn, zap.amount_msats)?;
+            info!(
+                "Updated balance for {}: {}msats",
+                npub.to_bech32()?,
+                bal.balance_msats
+            );
         }
 
         Ok(())
