@@ -13,7 +13,9 @@ use log::{error, info};
 use nostr::{EventBuilder, Keys, Kind, Metadata, Tag, TagKind, ToBech32};
 use nostr_sdk::Client;
 use std::path::PathBuf;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::spawn;
+use tokio::sync::oneshot;
 use tonic_openssl_lnd::lnrpc::{GetInfoRequest, GetInfoResponse};
 use tonic_openssl_lnd::LndLightningClient;
 use tower_http::cors::{Any, CorsLayer};
@@ -200,16 +202,42 @@ async fn main() -> anyhow::Result<()> {
 
     let server = axum::Server::bind(&addr).serve(server_router.into_make_service());
 
+    // Set up a oneshot channel to handle shutdown signal
+    let (tx, rx) = oneshot::channel();
+
+    // Spawn a task to listen for shutdown signals
+    spawn(async move {
+        let mut term_signal = signal(SignalKind::terminate())
+            .map_err(|e| eprintln!("failed to install TERM signal handler: {e}"))
+            .unwrap();
+        let mut int_signal = signal(SignalKind::interrupt())
+            .map_err(|e| {
+                eprintln!("failed to install INT signal handler: {e}");
+            })
+            .unwrap();
+
+        tokio::select! {
+            _ = term_signal.recv() => {
+                println!("Received SIGTERM");
+            },
+            _ = int_signal.recv() => {
+                println!("Received SIGINT");
+            },
+        }
+
+        let _ = tx.send(());
+    });
+
     let graceful = server.with_graceful_shutdown(async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to create Ctrl+C shutdown signal");
+        let _ = rx.await;
     });
 
     // Await the server to receive the shutdown signal
     if let Err(e) = graceful.await {
         error!("shutdown error: {}", e);
     }
+
+    info!("Graceful shutdown complete");
 
     Ok(())
 }
