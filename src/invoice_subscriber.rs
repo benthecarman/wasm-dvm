@@ -170,7 +170,9 @@ async fn handle_paid_zap(
                 .payment_secret(PaymentSecret(payment_secret))
                 .min_final_cltv_expiry_delta(144)
                 .basic_mpp()
-                .build_signed(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))?;
+                .build_signed(|hash| {
+                    Secp256k1::signing_only().sign_ecdsa_recoverable(hash, &private_key)
+                })?;
 
             let event = EventBuilder::zap_receipt(
                 fake_invoice.to_string(),

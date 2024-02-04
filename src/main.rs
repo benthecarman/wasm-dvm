@@ -196,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/.well-known/lnurlp/:name", get(get_lnurl_pay))
         .route("/.well-known/nostr.json", get(get_nip05))
         .fallback(fallback)
-        .layer(Extension(state.clone()))
+        .layer(Extension(state))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
