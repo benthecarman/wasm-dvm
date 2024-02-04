@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         let tags = vec![
             Tag::Generic(TagKind::Custom("k".to_string()), vec!["5600".to_string()]),
             Tag::Generic(
-                TagKind::Custom("d".to_string()),
+                TagKind::D,
                 vec!["9b38e816e53e412a934b0c8ff3135875".to_string()],
             ),
         ];
