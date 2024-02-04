@@ -2,7 +2,7 @@ use crate::job_listener::get_job_params;
 use crate::models::job::Job;
 use crate::models::mark_zap_paid;
 use crate::models::zap::Zap;
-use crate::wasm_handler::download_and_run_wasm;
+use crate::wasm_handler::{download_and_run_wasm, JobParams};
 use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::key::Secp256k1;
@@ -35,7 +35,7 @@ pub async fn start_invoice_subscription(
         .expect("Failed to start invoice subscription")
         .into_inner();
 
-    let client = Client::new(keys);
+    let client = Client::new(&keys);
     client.add_relays(relays).await?;
     client.connect().await;
 
@@ -49,9 +49,10 @@ pub async fn start_invoice_subscription(
                 let client = client.clone();
                 let http = http.clone();
                 let db_pool = db_pool.clone();
+                let keys = keys.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_invoice(ln_invoice, http, client, db_pool).await {
+                    if let Err(e) = handle_invoice(ln_invoice, http, client, &keys, db_pool).await {
                         error!("handle invoice error: {e}");
                     }
                 });
@@ -72,6 +73,7 @@ pub async fn handle_invoice(
     ln_invoice: Invoice,
     http: reqwest::Client,
     client: Client,
+    keys: &Keys,
     db_pool: Pool<ConnectionManager<PgConnection>>,
 ) -> anyhow::Result<()> {
     let mut conn = db_pool.get()?;
@@ -84,7 +86,8 @@ pub async fn handle_invoice(
     let job = job.unwrap();
 
     let event = job.request();
-    let builder = run_job_request(event, &http).await?;
+    let (params, input) = get_job_params(&event, keys).expect("must have valid params");
+    let builder = run_job_request(event, params, input, &http).await?;
 
     let event_id = client.send_event_builder(builder).await?;
     info!("Sent response: {event_id}");
@@ -94,15 +97,18 @@ pub async fn handle_invoice(
     Ok(())
 }
 
-pub async fn run_job_request(event: Event, http: &reqwest::Client) -> anyhow::Result<EventBuilder> {
-    let (params, string) = get_job_params(&event).expect("must have valid params");
-
+pub async fn run_job_request(
+    event: Event,
+    params: JobParams,
+    input: String,
+    http: &reqwest::Client,
+) -> anyhow::Result<EventBuilder> {
     let result = download_and_run_wasm(params, event.id, http).await?;
 
     let tags = vec![
         Tag::public_key(event.pubkey),
         Tag::event(event.id),
-        Tag::Generic(TagKind::I, vec![string]),
+        Tag::Generic(TagKind::I, vec![input]),
         Tag::Request(event),
     ];
     Ok(EventBuilder::new(Kind::JobResult(6600), result, tags))

@@ -8,8 +8,9 @@ use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
 use lightning_invoice::Bolt11Invoice;
 use log::{debug, error, info};
+use nostr::nips::nip04;
 use nostr::prelude::{DataVendingMachineStatus, ThirtyTwoByteHash};
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, TagKind, Timestamp};
+use nostr::{Event, EventBuilder, Filter, Keys, Kind, Tag, TagKind, Timestamp};
 use nostr_sdk::{Client, RelayPoolNotification};
 use std::str::FromStr;
 use tonic_openssl_lnd::{lnrpc, LndLightningClient};
@@ -21,7 +22,7 @@ pub async fn listen_for_jobs(
     db_pool: Pool<ConnectionManager<PgConnection>>,
     http: reqwest::Client,
 ) -> anyhow::Result<()> {
-    let client = Client::new(keys);
+    let client = Client::new(&keys);
     client.add_relays(config.relay.clone()).await?;
     client.connect().await;
 
@@ -39,11 +40,12 @@ pub async fn listen_for_jobs(
                 if event.kind == Kind::JobRequest(5600) {
                     // spawn thread to handle event
                     let client = client.clone();
+                    let keys = keys.clone();
                     let lnd = lnd.clone();
                     let db = db_pool.clone();
                     let http = http.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_event(event, client, lnd, db, &http).await {
+                        if let Err(e) = handle_event(event, client, keys, lnd, db, &http).await {
                             error!("Error handling event: {e}");
                         }
                     });
@@ -64,11 +66,12 @@ pub async fn listen_for_jobs(
 pub async fn handle_event(
     event: Event,
     client: Client,
+    keys: Keys,
     mut lnd: LndLightningClient,
     db_pool: Pool<ConnectionManager<PgConnection>>,
     http: &reqwest::Client,
 ) -> anyhow::Result<()> {
-    let (params, _) = get_job_params(&event)?;
+    let (params, input) = get_job_params(&event, &keys)?;
 
     if params.time > 60 * 10 * 1_000 {
         let builder = EventBuilder::job_feedback(
@@ -103,7 +106,7 @@ pub async fn handle_event(
                 b.update_balance(&mut conn, -amt)?;
 
                 // run job
-                run_job_request(event, http).await?
+                run_job_request(event, params, input, http).await?
             }
         }
         None => create_job_feedback_invoice(&event, value_msat, &mut lnd, &mut conn).await?,
@@ -146,10 +149,44 @@ async fn create_job_feedback_invoice(
     Ok(builder)
 }
 
-pub fn get_job_params(event: &Event) -> anyhow::Result<(JobParams, String)> {
-    let string = event
+pub fn get_job_params(event: &Event, keys: &Keys) -> anyhow::Result<(JobParams, String)> {
+    // if it is encrypted, decrypt the content to a tags array
+    let tags = if event
         .tags
         .iter()
+        .any(|t| t.kind().to_string() == "encrypted")
+    {
+        let p_tag = event
+            .tags
+            .iter()
+            .find_map(|t| {
+                if let Tag::PublicKey {
+                    public_key,
+                    uppercase: false,
+                    ..
+                } = t
+                {
+                    Some(*public_key)
+                } else {
+                    None
+                }
+            })
+            .ok_or(anyhow!("Encrypted tag not found: {event:?}"))?;
+
+        if p_tag != keys.public_key() {
+            return Err(anyhow!("Params are not encrypted to us!"));
+        }
+
+        let cleartext = nip04::decrypt(&keys.secret_key()?, &event.pubkey, &event.content)?;
+        let tags: Vec<Tag> = serde_json::from_str(&cleartext)?;
+
+        tags
+    } else {
+        event.tags.clone()
+    };
+
+    let string = tags
+        .into_iter()
         .find_map(|t| {
             if t.kind() == TagKind::I {
                 let vec = t.as_vec();
