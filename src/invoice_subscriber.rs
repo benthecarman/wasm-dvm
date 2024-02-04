@@ -155,7 +155,7 @@ async fn handle_paid_zap(
 
             let event_id = client.send_event_builder(event).await?;
 
-            println!(
+            info!(
                 "Broadcasted zap event id: {}!",
                 event_id.to_bech32().expect("bech32")
             );

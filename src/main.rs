@@ -186,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .expect("Failed to parse bind/port for webserver");
 
-    println!("Webserver running on http://{}", addr);
+    info!("Webserver running on http://{}", addr);
 
     let server_router = Router::new()
         .route("/get-invoice/:hash", get(get_invoice))
@@ -208,20 +208,20 @@ async fn main() -> anyhow::Result<()> {
     // Spawn a task to listen for shutdown signals
     spawn(async move {
         let mut term_signal = signal(SignalKind::terminate())
-            .map_err(|e| eprintln!("failed to install TERM signal handler: {e}"))
+            .map_err(|e| error!("failed to install TERM signal handler: {e}"))
             .unwrap();
         let mut int_signal = signal(SignalKind::interrupt())
             .map_err(|e| {
-                eprintln!("failed to install INT signal handler: {e}");
+                error!("failed to install INT signal handler: {e}");
             })
             .unwrap();
 
         tokio::select! {
             _ = term_signal.recv() => {
-                println!("Received SIGTERM");
+                info!("Received SIGTERM");
             },
             _ = int_signal.recv() => {
-                println!("Received SIGINT");
+                info!("Received SIGINT");
             },
         }
 
