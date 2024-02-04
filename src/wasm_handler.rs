@@ -1,6 +1,6 @@
 use anyhow::anyhow;
 use extism::{Manifest, Plugin, Wasm};
-use log::info;
+use log::{debug, info};
 use nostr::EventId;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,7 @@ use std::io::{Cursor, Seek};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::select;
+use tokio::time::Instant;
 
 const MAX_WASM_FILE_SIZE: u64 = 25_000_000; // 25mb
 
@@ -77,6 +78,7 @@ pub async fn run_wasm(file_path: PathBuf, job_params: JobParams) -> anyhow::Resu
     manifest.allowed_hosts = Some(vec!["*".to_string()]);
     let mut plugin = Plugin::new(manifest, [], true)?;
     let cancel_handle = plugin.cancel_handle();
+    let start = Instant::now();
     let fut = tokio::task::spawn_blocking(move || {
         plugin
             .call::<&str, &str>(&job_params.function, &job_params.input)
@@ -87,7 +89,9 @@ pub async fn run_wasm(file_path: PathBuf, job_params: JobParams) -> anyhow::Resu
 
     select! {
         result = fut => {
-            result?
+            let result = result?;
+            debug!("Complete, time elapsed: {}ms", start.elapsed().as_millis());
+            result
         }
         _ = sleep => {
             cancel_handle.cancel()?;
