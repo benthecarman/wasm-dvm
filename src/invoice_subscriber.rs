@@ -142,12 +142,12 @@ async fn handle_paid_zap(
 
             let invoice = zap.invoice();
 
-            let preimage = &mut [0u8; 32];
-            OsRng.fill_bytes(preimage);
-            let invoice_hash = sha256::Hash::hash(preimage);
+            let mut preimage = [0u8; 32];
+            OsRng.fill_bytes(&mut preimage);
+            let invoice_hash = sha256::Hash::hash(&preimage);
 
-            let payment_secret = &mut [0u8; 32];
-            OsRng.fill_bytes(payment_secret);
+            let mut payment_secret = [0u8; 32];
+            OsRng.fill_bytes(&mut payment_secret);
 
             let private_key = SecretKey::new(&mut OsRng);
 
@@ -167,7 +167,7 @@ async fn handle_paid_zap(
                 .invoice_description(invoice.description())
                 .current_timestamp()
                 .payment_hash(invoice_hash)
-                .payment_secret(PaymentSecret(*payment_secret))
+                .payment_secret(PaymentSecret(payment_secret))
                 .min_final_cltv_expiry_delta(144)
                 .basic_mpp()
                 .build_signed(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))?;
