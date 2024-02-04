@@ -93,27 +93,29 @@ pub async fn handle_event(
     let mut conn = db_pool.get()?;
     let balance = ZapBalance::get(&mut conn, &event.pubkey)?;
 
-    let builder = match balance {
-        Some(mut b) => {
-            if (b.balance_msats as u64) < value_msat {
-                create_job_feedback_invoice(&event, value_msat, &mut lnd, &mut conn).await?
-            } else {
-                info!(
-                    "User has enough balance, deducting {value_msat}msats from balance and running job"
-                );
-                // deduct balance
-                let amt = value_msat as i32;
-                b.update_balance(&mut conn, -amt)?;
+    match balance {
+        Some(mut b) if (b.balance_msats as u64) >= value_msat => {
+            info!(
+                "User has enough balance, deducting {value_msat}msats from balance and running job"
+            );
+            // deduct balance
+            let amt = value_msat as i32;
+            b.update_balance(&mut conn, -amt)?;
 
-                // run job
-                run_job_request(event, params, input, http).await?
-            }
+            // run job
+            let builder = run_job_request(event.clone(), params, input, http).await?;
+            let event_id = client.send_event_builder(builder).await?;
+            info!("Sent response: {event_id}");
+
+            Job::create_completed(&mut conn, &event, &event_id)?;
         }
-        None => create_job_feedback_invoice(&event, value_msat, &mut lnd, &mut conn).await?,
-    };
-
-    let event_id = client.send_event_builder(builder).await?;
-    info!("Sent response: {event_id}");
+        _ => {
+            let builder =
+                create_job_feedback_invoice(&event, value_msat, &mut lnd, &mut conn).await?;
+            let event_id = client.send_event_builder(builder).await?;
+            info!("Sent response: {event_id}");
+        }
+    }
 
     Ok(())
 }

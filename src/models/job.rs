@@ -37,6 +37,14 @@ struct NewJob {
     request: Value,
 }
 
+#[derive(Insertable, AsChangeset)]
+#[diesel(table_name = jobs)]
+struct CompletedJob {
+    payment_hash: Vec<u8>,
+    request: Value,
+    response_id: Vec<u8>,
+}
+
 impl Job {
     pub fn request(&self) -> Event {
         serde_json::from_value(self.request.clone()).expect("invalid request")
@@ -56,6 +64,24 @@ impl Job {
         let new_job = NewJob {
             payment_hash: payment_hash.to_vec(),
             request: serde_json::to_value(request)?,
+        };
+
+        let res = diesel::insert_into(jobs::table)
+            .values(new_job)
+            .get_result::<Self>(conn)?;
+
+        Ok(res)
+    }
+
+    pub fn create_completed(
+        conn: &mut PgConnection,
+        request: &Event,
+        response_id: &EventId,
+    ) -> anyhow::Result<Self> {
+        let new_job = CompletedJob {
+            payment_hash: response_id.to_bytes().to_vec(),
+            request: serde_json::to_value(request)?,
+            response_id: response_id.to_bytes().to_vec(),
         };
 
         let res = diesel::insert_into(jobs::table)
