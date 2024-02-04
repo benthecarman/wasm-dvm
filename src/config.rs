@@ -38,12 +38,15 @@ pub struct Config {
     /// The domain name you are running the lnurl server on
     #[clap(default_value_t = String::from("localhost:3000"), long)]
     pub domain: String,
-    #[clap(default_value_t = String::from("0.0.0.0"), long)]
     /// Bind address for webserver
+    #[clap(default_value_t = String::from("0.0.0.0"), long)]
     pub bind: String,
-    #[clap(default_value_t = 3000, long)]
     /// Port for webserver
+    #[clap(default_value_t = 3000, long)]
     pub port: u16,
+    /// How many millisats per millisecond of runtime
+    #[clap(default_value_t = 1.0, long)]
+    pub price: f64,
 }
 
 impl Config {

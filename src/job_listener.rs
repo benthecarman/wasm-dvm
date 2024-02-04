@@ -44,8 +44,11 @@ pub async fn listen_for_jobs(
                     let lnd = lnd.clone();
                     let db = db_pool.clone();
                     let http = http.clone();
+                    let price = config.price;
                     tokio::spawn(async move {
-                        if let Err(e) = handle_event(event, client, keys, lnd, db, &http).await {
+                        if let Err(e) =
+                            handle_event(price, event, client, keys, lnd, db, &http).await
+                        {
                             error!("Error handling event: {e}");
                         }
                     });
@@ -64,6 +67,7 @@ pub async fn listen_for_jobs(
 }
 
 pub async fn handle_event(
+    price: f64,
     event: Event,
     client: Client,
     keys: Keys,
@@ -87,8 +91,7 @@ pub async fn handle_event(
         return Ok(());
     }
 
-    // 1 sat per millisecond
-    let value_msat = params.time * 1_000;
+    let value_msat = (params.time as f64 * price) as u64;
 
     let mut conn = db_pool.get()?;
     let balance = ZapBalance::get(&mut conn, &event.pubkey)?;
