@@ -106,7 +106,7 @@ pub async fn handle_event(
             b.update_balance(&mut conn, -amt)?;
 
             // run job
-            let builder = run_job_request(event.clone(), params, input, http).await;
+            let builder = run_job_request(event.clone(), params, input, &keys, http).await?;
             let event_id = client.send_event_builder(builder).await?;
             info!("Sent response: {event_id}");
 

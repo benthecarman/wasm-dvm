@@ -13,6 +13,7 @@ use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
 use lightning_invoice::{Currency, InvoiceBuilder, PaymentSecret};
 use log::{error, info};
+use nostr::nips::nip04;
 use nostr::prelude::DataVendingMachineStatus;
 use nostr::{Event, EventBuilder, Keys, Kind, Tag, TagKind, ToBech32};
 use nostr_sdk::Client;
@@ -88,7 +89,7 @@ pub async fn handle_invoice(
 
     let event = job.request();
     let (params, input) = get_job_params(&event, keys).expect("must have valid params");
-    let builder = run_job_request(event, params, input, &http).await;
+    let builder = run_job_request(event, params, input, keys, &http).await?;
 
     let event_id = client.send_event_builder(builder).await?;
     info!("Sent response: {event_id}");
@@ -102,28 +103,43 @@ pub async fn run_job_request(
     event: Event,
     params: JobParams,
     input: String,
+    keys: &Keys,
     http: &reqwest::Client,
-) -> EventBuilder {
+) -> anyhow::Result<EventBuilder> {
     match download_and_run_wasm(params, event.id, http).await {
         Ok(result) => {
-            let tags = vec![
+            let mut tags = vec![
                 Tag::public_key(event.pubkey),
                 Tag::event(event.id),
                 Tag::Generic(TagKind::I, vec![input]),
-                Tag::Request(event),
+                Tag::Request(event.clone()),
             ];
-            EventBuilder::new(Kind::JobResult(6600), result, tags)
+
+            if event
+                .tags
+                .iter()
+                .any(|t| t.kind().to_string() == "encrypted")
+            {
+                tags.push(Tag::Generic(
+                    TagKind::Custom("encrypted".to_string()),
+                    vec![],
+                ));
+                let encrypted = nip04::encrypt(&keys.secret_key()?, &event.pubkey, result)?;
+                Ok(EventBuilder::new(Kind::JobResult(6600), encrypted, tags))
+            } else {
+                Ok(EventBuilder::new(Kind::JobResult(6600), result, tags))
+            }
         }
         Err(e) => {
             error!("Error running event {}: {e}", event.id);
-            EventBuilder::job_feedback(
+            Ok(EventBuilder::job_feedback(
                 &event,
                 DataVendingMachineStatus::Error,
                 Some(e.to_string()),
                 0,
                 None,
                 None,
-            )
+            ))
         }
     }
 }
