@@ -172,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
             {
-                error!("Error in loop: {e}");
+                error!("Error listening for jobs: {e}");
             }
         }
     });
