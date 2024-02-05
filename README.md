@@ -8,6 +8,14 @@ Currently, this uses [extism](https://extism.org/) as the execution environment.
 WebAssembly runtime environment. If you want to develop a wasm plugin, you can use the [extism](https://extism.org/)
 PDK for developing and testing your wasm code.
 
+## Currently Supported Features
+
+- [x] Pay per time execution
+- [x] Pre-paid execution with zaps
+- [x] Encrypted input and output
+- [ ] Scheduled execution
+- [ ] DLC announcement based execution
+
 ## Nostr Events
 
 ### Input
