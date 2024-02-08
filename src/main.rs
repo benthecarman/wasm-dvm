@@ -1,5 +1,5 @@
 use crate::config::{Config, ServerKeys};
-use crate::job_listener::listen_for_jobs;
+use crate::job_listener::{listen_for_jobs, process_schedule_jobs_round};
 use crate::models::MIGRATIONS;
 use crate::routes::{get_invoice, get_lnurl_pay, get_nip05};
 use axum::http::{Method, StatusCode, Uri};
@@ -12,10 +12,13 @@ use diesel_migrations::MigrationHarness;
 use log::{error, info};
 use nostr::{EventBuilder, Keys, Kind, Metadata, Tag, TagKind, ToBech32};
 use nostr_sdk::Client;
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::spawn;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Mutex};
+use tokio::time::sleep;
 use tonic_openssl_lnd::lnrpc::{GetInfoRequest, GetInfoResponse};
 use tonic_openssl_lnd::LndLightningClient;
 use tower_http::cors::{Any, CorsLayer};
@@ -70,13 +73,13 @@ async fn main() -> anyhow::Result<()> {
     let mut events = vec![];
     if server_keys.kind0.is_none() {
         let metadata = Metadata {
-            name: Some("wasm_dvm".to_string()),
-            display_name: Some("Wasm DVM".to_string()),
-            picture: Some("https://camo.githubusercontent.com/df088e16e0c36ae3804306bdf1ec1f27b0953dc5986bce126b59502a33d8072d/68747470733a2f2f692e696d6775722e636f6d2f6d58626c5233392e706e67".to_string()),
-            nip05: Some(format!("_@{}", config.domain)),
-            lud16: Some(format!("wasm-dvm@{}", config.domain)),
-            ..Default::default()
-        };
+			name: Some("wasm_dvm".to_string()),
+			display_name: Some("Wasm DVM".to_string()),
+			picture: Some("https://camo.githubusercontent.com/df088e16e0c36ae3804306bdf1ec1f27b0953dc5986bce126b59502a33d8072d/68747470733a2f2f692e696d6775722e636f6d2f6d58626c5233392e706e67".to_string()),
+			nip05: Some(format!("_@{}", config.domain)),
+			lud16: Some(format!("wasm-dvm@{}", config.domain)),
+			..Default::default()
+		};
         let event = EventBuilder::metadata(&metadata).to_event(&keys)?;
         server_keys.kind0 = Some(event.clone());
         events.push(event)
@@ -160,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
     let jobs_keys = keys.clone();
     let jobs_lnd = lnd.clone();
     let jobs_db_pool = db_pool.clone();
+    let jobs_http = http.clone();
     spawn(async move {
         loop {
             info!("Starting listen with key: {bech32}");
@@ -168,12 +172,47 @@ async fn main() -> anyhow::Result<()> {
                 jobs_keys.clone(),
                 jobs_lnd.clone(),
                 jobs_db_pool.clone(),
-                http.clone(),
+                jobs_http.clone(),
             )
             .await
             {
                 error!("Error listening for jobs: {e}");
             }
+        }
+    });
+
+    // listen for scheduled jobs
+    let schedule_db_pool = db_pool.clone();
+    let schedule_keys = keys.clone();
+    let relays = config.relay.clone();
+    spawn(async move {
+        // check for scheduled jobs every 10 seconds
+        let duration = std::time::Duration::from_secs(10);
+
+        let client = Client::new(&schedule_keys);
+        client
+            .add_relays(relays)
+            .await
+            .unwrap_or_else(|_| panic!("Failed to add relays for scheduled jobs"));
+        client.connect().await;
+
+        // Create a lock on the active jobs we are running so we don't run the same job twice
+        let active_jobs: Arc<Mutex<HashSet<i32>>> = Arc::new(Mutex::new(HashSet::new()));
+
+        info!("Starting scheduled job loop");
+        loop {
+            if let Err(e) = process_schedule_jobs_round(
+                &client,
+                schedule_keys.clone(),
+                schedule_db_pool.clone(),
+                http.clone(),
+                active_jobs.clone(),
+            )
+            .await
+            {
+                error!("Error processing scheduled jobs: {e}");
+            }
+            sleep(duration).await
         }
     });
 

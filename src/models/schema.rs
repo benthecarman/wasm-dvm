@@ -8,6 +8,7 @@ diesel::table! {
         response_id -> Nullable<Bytea>,
         created_at -> Timestamp,
         updated_at -> Timestamp,
+        scheduled_at -> Nullable<Timestamp>,
     }
 }
 

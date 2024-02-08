@@ -17,6 +17,7 @@ use nostr::nips::nip04;
 use nostr::prelude::DataVendingMachineStatus;
 use nostr::{Event, EventBuilder, Keys, Kind, Tag, TagKind, ToBech32};
 use nostr_sdk::Client;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tonic_openssl_lnd::lnrpc::invoice::InvoiceState;
 use tonic_openssl_lnd::lnrpc::Invoice;
 use tonic_openssl_lnd::{lnrpc, LndLightningClient};
@@ -89,14 +90,43 @@ pub async fn handle_invoice(
 
     let event = job.request();
     let (params, input) = get_job_params(&event, keys).expect("must have valid params");
-    let builder = run_job_request(event, params, input, keys, &http).await?;
+    let builder = handle_job_request(&mut conn, event, params, input, keys, &http).await?;
 
-    let event_id = client.send_event_builder(builder).await?;
-    info!("Sent response: {event_id}");
+    if let Some(builder) = builder {
+        let event_id = client.send_event_builder(builder).await?;
+        info!("Sent response: {event_id}");
 
-    Job::set_response_id(&mut conn, job.id, event_id)?;
+        Job::set_response_id(&mut conn, job.id, event_id)?;
+    }
 
     Ok(())
+}
+
+pub async fn handle_job_request(
+    conn: &mut PgConnection,
+    event: Event,
+    params: JobParams,
+    input: String,
+    keys: &Keys,
+    http: &reqwest::Client,
+) -> anyhow::Result<Option<EventBuilder>> {
+    match params.schedule.as_ref() {
+        Some(schedule) => {
+            // todo make DLC oracle
+            if schedule.run_date <= SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() {
+                run_job_request(event, params, input, keys, http)
+                    .await
+                    .map(Some)
+            } else {
+                // schedule job for future
+                Job::create_scheduled(conn, &event, schedule.run_date)?;
+                Ok(None)
+            }
+        }
+        None => run_job_request(event, params, input, keys, http)
+            .await
+            .map(Some),
+    }
 }
 
 pub async fn run_job_request(

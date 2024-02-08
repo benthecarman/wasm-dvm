@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::invoice_subscriber::run_job_request;
+use crate::invoice_subscriber::{handle_job_request, run_job_request};
 use crate::models::job::Job;
 use crate::models::zap_balance::ZapBalance;
 use crate::wasm_handler::JobParams;
@@ -12,7 +12,11 @@ use nostr::nips::nip04;
 use nostr::prelude::{DataVendingMachineStatus, ThirtyTwoByteHash};
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, Tag, TagKind, Timestamp};
 use nostr_sdk::{Client, RelayPoolNotification};
+use std::collections::HashSet;
 use std::str::FromStr;
+use std::sync::Arc;
+use tokio::spawn;
+use tokio::sync::Mutex;
 use tonic_openssl_lnd::{lnrpc, LndLightningClient};
 
 pub async fn listen_for_jobs(
@@ -105,16 +109,26 @@ pub async fn handle_event(
             let amt = value_msat as i32;
             b.update_balance(&mut conn, -amt)?;
 
-            // run job
-            let builder = run_job_request(event.clone(), params, input, &keys, http).await?;
-            let event_id = client.send_event_builder(builder).await?;
-            info!("Sent response: {event_id}");
+            // handle job
+            let builder =
+                handle_job_request(&mut conn, event.clone(), params, input, &keys, http).await?;
 
-            Job::create_completed(&mut conn, &event, &event_id)?;
+            if let Some(builder) = builder {
+                let event_id = client.send_event_builder(builder).await?;
+                info!("Sent response: {event_id}");
+
+                Job::create_completed(&mut conn, &event, &event_id)?;
+            }
         }
         _ => {
-            let builder =
-                create_job_feedback_invoice(&event, value_msat, &mut lnd, &mut conn).await?;
+            let builder = create_job_feedback_invoice(
+                &event,
+                value_msat,
+                params.schedule.map(|u| u.run_date),
+                &mut lnd,
+                &mut conn,
+            )
+            .await?;
             let event_id = client.send_event_builder(builder).await?;
             info!("Sent response: {event_id}");
         }
@@ -126,6 +140,7 @@ pub async fn handle_event(
 async fn create_job_feedback_invoice(
     event: &Event,
     value_msat: u64,
+    scheduled_at: Option<u64>,
     lnd: &mut LndLightningClient,
     conn: &mut PgConnection,
 ) -> anyhow::Result<EventBuilder> {
@@ -141,7 +156,7 @@ async fn create_job_feedback_invoice(
 
     debug!("Created invoice: {bolt11}");
 
-    Job::create(conn, invoice.payment_hash().into_32(), event)?;
+    Job::create(conn, invoice.payment_hash().into_32(), event, scheduled_at)?;
 
     let builder = EventBuilder::job_feedback(
         event,
@@ -209,4 +224,66 @@ pub fn get_job_params(event: &Event, keys: &Keys) -> anyhow::Result<(JobParams, 
     let params: JobParams = serde_json::from_str(&string)?;
 
     Ok((params, string))
+}
+
+pub async fn process_schedule_jobs_round(
+    client: &Client,
+    keys: Keys,
+    db_pool: Pool<ConnectionManager<PgConnection>>,
+    http: reqwest::Client,
+    active_jobs: Arc<Mutex<HashSet<i32>>>,
+) -> anyhow::Result<()> {
+    let mut conn = db_pool.get()?;
+    let mut jobs = Job::get_ready_to_run_jobs(&mut conn)?;
+    drop(conn);
+
+    // update active jobs
+    let mut active = active_jobs.lock().await;
+    jobs.retain(|j| !active.contains(&j.id));
+    active.extend(jobs.iter().map(|j| j.id));
+    drop(active);
+
+    if !jobs.is_empty() {
+        info!("Running {} scheduled jobs", jobs.len());
+    }
+
+    for job in jobs {
+        let client = client.clone();
+        let keys = keys.clone();
+        let db_pool = db_pool.clone();
+        let http = http.clone();
+        let active = active_jobs.clone();
+
+        spawn(async move {
+            if let Err(e) = run_scheduled_job(client, keys, db_pool, http, active, job).await {
+                error!("Error running scheduled job: {e}");
+            }
+        });
+    }
+
+    Ok(())
+}
+
+async fn run_scheduled_job(
+    client: Client,
+    keys: Keys,
+    db_pool: Pool<ConnectionManager<PgConnection>>,
+    http: reqwest::Client,
+    active_jobs: Arc<Mutex<HashSet<i32>>>,
+    job: Job,
+) -> anyhow::Result<()> {
+    let event = job.request();
+    let (params, input) = get_job_params(&event, &keys)?;
+
+    let builder = run_job_request(event, params, input, &keys, &http).await?;
+    let event_id = client.send_event_builder(builder).await?;
+    info!("Sent response: {event_id}");
+
+    let mut active = active_jobs.lock().await;
+    active.remove(&job.id);
+
+    let mut conn = db_pool.get()?;
+    Job::set_response_id(&mut conn, job.id, event_id)?;
+
+    Ok(())
 }

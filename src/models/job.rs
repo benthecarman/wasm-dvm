@@ -28,6 +28,7 @@ pub struct Job {
     response_id: Option<Vec<u8>>,
     created_at: chrono::NaiveDateTime,
     updated_at: chrono::NaiveDateTime,
+    scheduled_at: Option<chrono::NaiveDateTime>,
 }
 
 #[derive(Insertable, AsChangeset)]
@@ -35,6 +36,7 @@ pub struct Job {
 struct NewJob {
     payment_hash: Vec<u8>,
     request: Value,
+    scheduled_at: Option<chrono::NaiveDateTime>,
 }
 
 #[derive(Insertable, AsChangeset)]
@@ -60,10 +62,39 @@ impl Job {
         conn: &mut PgConnection,
         payment_hash: [u8; 32],
         request: &Event,
+        scheduled_at: Option<u64>,
     ) -> anyhow::Result<Self> {
+        let scheduled_at = scheduled_at
+            .map(|t| {
+                chrono::NaiveDateTime::from_timestamp_opt(t as i64, 0)
+                    .ok_or(anyhow::anyhow!("invalid timestamp"))
+            })
+            .transpose()?;
+
         let new_job = NewJob {
             payment_hash: payment_hash.to_vec(),
             request: serde_json::to_value(request)?,
+            scheduled_at,
+        };
+
+        let res = diesel::insert_into(jobs::table)
+            .values(new_job)
+            .get_result::<Self>(conn)?;
+
+        Ok(res)
+    }
+
+    pub fn create_scheduled(
+        conn: &mut PgConnection,
+        request: &Event,
+        scheduled_at: u64,
+    ) -> anyhow::Result<Self> {
+        let scheduled_at = chrono::NaiveDateTime::from_timestamp_opt(scheduled_at as i64, 0)
+            .ok_or(anyhow::anyhow!("invalid timestamp"))?;
+        let new_job = NewJob {
+            payment_hash: request.id.to_bytes().to_vec(),
+            request: serde_json::to_value(request)?,
+            scheduled_at: Some(scheduled_at),
         };
 
         let res = diesel::insert_into(jobs::table)
@@ -79,7 +110,7 @@ impl Job {
         response_id: &EventId,
     ) -> anyhow::Result<Self> {
         let new_job = CompletedJob {
-            payment_hash: response_id.to_bytes().to_vec(),
+            payment_hash: request.id.to_bytes().to_vec(),
             request: serde_json::to_value(request)?,
             response_id: response_id.to_bytes().to_vec(),
         };
@@ -114,5 +145,15 @@ impl Job {
             .get_result::<Self>(conn)?;
 
         Ok(job)
+    }
+
+    /// Get jobs that we haven't run and who's scheduled time is in the past
+    pub fn get_ready_to_run_jobs(conn: &mut PgConnection) -> anyhow::Result<Vec<Self>> {
+        let res = jobs::table
+            .filter(jobs::response_id.is_null())
+            .filter(jobs::scheduled_at.lt(diesel::dsl::now))
+            .load::<Self>(conn)?;
+
+        Ok(res)
     }
 }

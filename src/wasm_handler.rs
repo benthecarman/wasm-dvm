@@ -16,12 +16,23 @@ use tokio::time::Instant;
 const MAX_WASM_FILE_SIZE: u64 = 25_000_000; // 25mb
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledParams {
+    /// Expected outputs, if provided, a DLC announcement will be made if the output matches
+    pub expected_outputs: Option<Vec<String>>,
+    /// The time to run the wasm in seconds from epoch
+    pub run_date: u64,
+    /// What to name the announcement
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobParams {
     pub url: String,
     pub function: String,
     pub input: String,
     pub time: u64,
     pub checksum: String,
+    pub schedule: Option<ScheduledParams>,
 }
 
 pub async fn download_and_run_wasm(
@@ -116,6 +127,7 @@ mod test {
             time: 500,
             checksum: "93898457953d30d016f712ccf4336ce7e9971db5f7f3aff1edd252764f75d5d7"
                 .to_string(),
+            schedule: None,
         };
         let result = download_and_run_wasm(params, EventId::all_zeros(), &reqwest::Client::new())
             .await
@@ -136,6 +148,7 @@ mod test {
             time: 5_000,
             checksum: "fe7ff8aaf45d67dd0d6b9fdfe3aa871e658a83adcf19c8f016013c29e8857f03"
                 .to_string(),
+            schedule: None,
         };
         let result = download_and_run_wasm(params, EventId::all_zeros(), &reqwest::Client::new())
             .await
@@ -156,6 +169,7 @@ mod test {
             time: 1_000,
             checksum: "6e6386b9194f2298b5e55e88c25fe66dda454f0e2604da6964735ab1c554b513"
                 .to_string(),
+            schedule: None,
         };
         let err =
             download_and_run_wasm(params, EventId::all_zeros(), &reqwest::Client::new()).await;
