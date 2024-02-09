@@ -1,7 +1,8 @@
 use crate::job_listener::get_job_params;
+use crate::models::event_job::EventJob;
 use crate::models::job::Job;
-use crate::models::mark_zap_paid;
 use crate::models::zap::Zap;
+use crate::models::{mark_zap_paid, PostgresStorage};
 use crate::wasm_handler::{download_and_run_wasm, JobParams};
 use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
@@ -11,6 +12,7 @@ use bitcoin::secp256k1::rand::RngCore;
 use bitcoin::secp256k1::SecretKey;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
+use kormir::Oracle;
 use lightning_invoice::{Currency, InvoiceBuilder, PaymentSecret};
 use log::{error, info};
 use nostr::nips::nip04;
@@ -28,6 +30,7 @@ pub async fn start_invoice_subscription(
     keys: Keys,
     http: reqwest::Client,
     db_pool: Pool<ConnectionManager<PgConnection>>,
+    oracle: Oracle<PostgresStorage>,
 ) -> anyhow::Result<()> {
     info!("Starting invoice subscription");
 
@@ -53,9 +56,12 @@ pub async fn start_invoice_subscription(
                 let http = http.clone();
                 let db_pool = db_pool.clone();
                 let keys = keys.clone();
+                let oracle = oracle.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_invoice(ln_invoice, http, client, &keys, db_pool).await {
+                    if let Err(e) =
+                        handle_invoice(ln_invoice, http, client, &keys, db_pool, oracle).await
+                    {
                         error!("handle invoice error: {e}");
                     }
                 });
@@ -78,6 +84,7 @@ pub async fn handle_invoice(
     client: Client,
     keys: &Keys,
     db_pool: Pool<ConnectionManager<PgConnection>>,
+    oracle: Oracle<PostgresStorage>,
 ) -> anyhow::Result<()> {
     let mut conn = db_pool.get()?;
     let job = Job::get_by_payment_hash(&mut conn, &ln_invoice.r_hash)?;
@@ -90,16 +97,35 @@ pub async fn handle_invoice(
 
     let event = job.request();
     let (params, input) = get_job_params(&event, keys).expect("must have valid params");
-    let builder = handle_job_request(&mut conn, event, params, input, keys, &http).await?;
+    let relays = client
+        .relays()
+        .await
+        .keys()
+        .map(|r| r.to_string())
+        .collect::<Vec<_>>();
+    let job_result = handle_job_request(
+        &mut conn, event, params, input, keys, &http, &oracle, relays,
+    )
+    .await?;
 
-    if let Some(builder) = builder {
+    if let Some(builder) = job_result.reply_event {
         let event_id = client.send_event_builder(builder).await?;
         info!("Sent response: {event_id}");
 
         Job::set_response_id(&mut conn, job.id, event_id)?;
     }
 
+    if let Some(oracle_announcement) = job_result.oracle_announcement {
+        let event_id = client.send_event(oracle_announcement).await?;
+        info!("Sent oracle announcement: {event_id}");
+    }
+
     Ok(())
+}
+
+pub struct HandleJobResult {
+    pub reply_event: Option<EventBuilder>,
+    pub oracle_announcement: Option<Event>,
 }
 
 pub async fn handle_job_request(
@@ -109,23 +135,51 @@ pub async fn handle_job_request(
     input: String,
     keys: &Keys,
     http: &reqwest::Client,
-) -> anyhow::Result<Option<EventBuilder>> {
+    oracle: &Oracle<PostgresStorage>,
+    relays: Vec<String>,
+) -> anyhow::Result<HandleJobResult> {
     match params.schedule.as_ref() {
         Some(schedule) => {
-            // todo make DLC oracle
             if schedule.run_date <= SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() {
-                run_job_request(event, params, input, keys, http)
-                    .await
-                    .map(Some)
-            } else {
-                // schedule job for future
-                Job::create_scheduled(conn, &event, schedule.run_date)?;
-                Ok(None)
+                anyhow::bail!("Schedule run date must be in the future");
             }
+
+            let oracle_data = if let Some(outcomes) = schedule.expected_outputs.clone() {
+                let event_name = schedule.name.clone().unwrap_or(event.id.to_hex());
+                let (id, ann) = oracle
+                    .create_enum_event(event_name, outcomes, schedule.run_date as u32)
+                    .await?;
+
+                let event = kormir::nostr_events::create_announcement_event(
+                    &oracle.nostr_keys(),
+                    &ann,
+                    &relays,
+                )?;
+
+                Some((id, event))
+            } else {
+                None
+            };
+
+            let job = Job::create_scheduled(conn, &event, schedule.run_date)?;
+            if let Some((event_id, event)) = oracle_data {
+                EventJob::create(conn, job.id, event_id as i32)?;
+                oracle
+                    .storage
+                    .add_announcement_event_id(event_id, event.id)
+                    .await?;
+            }
+            Ok(HandleJobResult {
+                reply_event: None,
+                oracle_announcement: Some(event),
+            })
         }
         None => run_job_request(event, params, input, keys, http)
             .await
-            .map(Some),
+            .map(|reply_event| HandleJobResult {
+                reply_event: Some(reply_event),
+                oracle_announcement: None,
+            }),
     }
 }
 

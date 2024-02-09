@@ -1,16 +1,21 @@
 use crate::config::Config;
 use crate::invoice_subscriber::{handle_job_request, run_job_request};
+use crate::models::event_job::EventJob;
 use crate::models::job::Job;
 use crate::models::zap_balance::ZapBalance;
+use crate::models::PostgresStorage;
 use crate::wasm_handler::JobParams;
 use anyhow::anyhow;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
+use kormir::nostr_events::create_attestation_event;
+use kormir::storage::Storage;
+use kormir::{EventDescriptor, Oracle};
 use lightning_invoice::Bolt11Invoice;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use nostr::nips::nip04;
 use nostr::prelude::{DataVendingMachineStatus, ThirtyTwoByteHash};
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, Tag, TagKind, Timestamp};
+use nostr::{Event, EventBuilder, EventId, Filter, Keys, Kind, Tag, TagKind, Timestamp};
 use nostr_sdk::{Client, RelayPoolNotification};
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -25,6 +30,7 @@ pub async fn listen_for_jobs(
     lnd: LndLightningClient,
     db_pool: Pool<ConnectionManager<PgConnection>>,
     http: reqwest::Client,
+    oracle: Oracle<PostgresStorage>,
 ) -> anyhow::Result<()> {
     let client = Client::new(&keys);
     client.add_relays(config.relay.clone()).await?;
@@ -49,9 +55,10 @@ pub async fn listen_for_jobs(
                     let db = db_pool.clone();
                     let http = http.clone();
                     let price = config.price;
-                    tokio::spawn(async move {
+                    let oracle = oracle.clone();
+                    spawn(async move {
                         if let Err(e) =
-                            handle_event(price, event, client, keys, lnd, db, &http).await
+                            handle_event(price, event, client, keys, lnd, db, &http, oracle).await
                         {
                             error!("Error handling event: {e}");
                         }
@@ -78,6 +85,7 @@ pub async fn handle_event(
     mut lnd: LndLightningClient,
     db_pool: Pool<ConnectionManager<PgConnection>>,
     http: &reqwest::Client,
+    oracle: Oracle<PostgresStorage>,
 ) -> anyhow::Result<()> {
     let (params, input) = get_job_params(&event, &keys)?;
 
@@ -109,15 +117,36 @@ pub async fn handle_event(
             let amt = value_msat as i32;
             b.update_balance(&mut conn, -amt)?;
 
-            // handle job
-            let builder =
-                handle_job_request(&mut conn, event.clone(), params, input, &keys, http).await?;
+            let relays = client
+                .relays()
+                .await
+                .keys()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>();
 
-            if let Some(builder) = builder {
+            // handle job
+            let job_result = handle_job_request(
+                &mut conn,
+                event.clone(),
+                params,
+                input,
+                &keys,
+                http,
+                &oracle,
+                relays,
+            )
+            .await?;
+
+            if let Some(builder) = job_result.reply_event {
                 let event_id = client.send_event_builder(builder).await?;
                 info!("Sent response: {event_id}");
 
                 Job::create_completed(&mut conn, &event, &event_id)?;
+            }
+
+            if let Some(oracle_announcement) = job_result.oracle_announcement {
+                let event_id = client.send_event(oracle_announcement).await?;
+                info!("Sent oracle announcement: {event_id}");
             }
         }
         _ => {
@@ -231,6 +260,7 @@ pub async fn process_schedule_jobs_round(
     keys: Keys,
     db_pool: Pool<ConnectionManager<PgConnection>>,
     http: reqwest::Client,
+    oracle: Oracle<PostgresStorage>,
     active_jobs: Arc<Mutex<HashSet<i32>>>,
 ) -> anyhow::Result<()> {
     let mut conn = db_pool.get()?;
@@ -252,10 +282,13 @@ pub async fn process_schedule_jobs_round(
         let keys = keys.clone();
         let db_pool = db_pool.clone();
         let http = http.clone();
+        let oracle = oracle.clone();
         let active = active_jobs.clone();
 
         spawn(async move {
-            if let Err(e) = run_scheduled_job(client, keys, db_pool, http, active, job).await {
+            if let Err(e) =
+                run_scheduled_job(client, keys, db_pool, http, oracle, active, job).await
+            {
                 error!("Error running scheduled job: {e}");
             }
         });
@@ -269,6 +302,7 @@ async fn run_scheduled_job(
     keys: Keys,
     db_pool: Pool<ConnectionManager<PgConnection>>,
     http: reqwest::Client,
+    oracle: Oracle<PostgresStorage>,
     active_jobs: Arc<Mutex<HashSet<i32>>>,
     job: Job,
 ) -> anyhow::Result<()> {
@@ -276,7 +310,9 @@ async fn run_scheduled_job(
     let (params, input) = get_job_params(&event, &keys)?;
 
     let builder = run_job_request(event, params, input, &keys, &http).await?;
-    let event_id = client.send_event_builder(builder).await?;
+    let event = builder.to_event(&keys)?;
+    let outcome = event.content.clone();
+    let event_id = client.send_event(event).await?;
     info!("Sent response: {event_id}");
 
     let mut active = active_jobs.lock().await;
@@ -284,6 +320,40 @@ async fn run_scheduled_job(
 
     let mut conn = db_pool.get()?;
     Job::set_response_id(&mut conn, job.id, event_id)?;
+    // handle oracle stuff
+    if let Some(event_job) = EventJob::get_by_job_id(&mut conn, job.id)? {
+        if let Some(oracle_event) = oracle.storage.get_event(event_job.event_id as u32).await? {
+            let outcomes = match oracle_event.announcement.oracle_event.event_descriptor {
+                EventDescriptor::EnumEvent(enum_event) => enum_event.outcomes,
+                EventDescriptor::DigitDecompositionEvent(_) => {
+                    unimplemented!("Numeric events not implemented")
+                }
+            };
+            if oracle_event.announcement_event_id.is_none() {
+                warn!("Oracle event not announced, skipping attestation");
+                return Ok(());
+            }
+
+            if outcomes.contains(&outcome) {
+                let att = oracle
+                    .sign_enum_event(event_job.event_id as u32, outcome)
+                    .await?;
+                let att_event = create_attestation_event(
+                    &oracle.nostr_keys(),
+                    &att,
+                    EventId::from_str(&oracle_event.announcement_event_id.unwrap())?,
+                )?;
+                oracle
+                    .storage
+                    .add_attestation_event_id(event_job.event_id as u32, att_event.id)
+                    .await?;
+                let att_id = client.send_event(att_event).await?;
+                info!("Sent oracle event outcome: {att_id}");
+            } else {
+                warn!("Outcome not valid for oracle event, got {outcome}, expected one of {outcomes:?}");
+            }
+        }
+    }
 
     Ok(())
 }

@@ -1,6 +1,8 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::config::{Config, ServerKeys};
 use crate::job_listener::{listen_for_jobs, process_schedule_jobs_round};
-use crate::models::MIGRATIONS;
+use crate::models::{PostgresStorage, MIGRATIONS};
 use crate::routes::{get_invoice, get_lnurl_pay, get_nip05};
 use axum::http::{Method, StatusCode, Uri};
 use axum::routing::get;
@@ -9,6 +11,7 @@ use clap::Parser;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
 use diesel_migrations::MigrationHarness;
+use kormir::Oracle;
 use log::{error, info};
 use nostr::{EventBuilder, Keys, Kind, Metadata, Tag, TagKind, ToBech32};
 use nostr_sdk::Client;
@@ -135,6 +138,14 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Connected to LND: {}", lnd_info.identity_pubkey);
 
+    // initialize oracle, need to convert to old rust-bitcoin types
+    let oracle = {
+        let signing_key =
+            kormir::bitcoin::secp256k1::SecretKey::from_slice(&keys.secret_key()?.secret_bytes())?;
+        let pubkey = kormir::bitcoin::XOnlyPublicKey::from_slice(&keys.public_key().serialize())?;
+        Oracle::from_signing_key(PostgresStorage::new(db_pool.clone(), pubkey)?, signing_key)?
+    };
+
     let http = reqwest::Client::new();
 
     let invoice_lnd = lnd.clone();
@@ -142,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
     let invoice_keys = keys.clone();
     let invoice_db_pool = db_pool.clone();
     let invoice_http = http.clone();
+    let invoice_oracle = oracle.clone();
     spawn(async move {
         loop {
             if let Err(e) = invoice_subscriber::start_invoice_subscription(
@@ -150,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
                 invoice_keys.clone(),
                 invoice_http.clone(),
                 invoice_db_pool.clone(),
+                invoice_oracle.clone(),
             )
             .await
             {
@@ -164,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
     let jobs_lnd = lnd.clone();
     let jobs_db_pool = db_pool.clone();
     let jobs_http = http.clone();
+    let jobs_oracle = oracle.clone();
     spawn(async move {
         loop {
             info!("Starting listen with key: {bech32}");
@@ -173,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
                 jobs_lnd.clone(),
                 jobs_db_pool.clone(),
                 jobs_http.clone(),
+                jobs_oracle.clone(),
             )
             .await
             {
@@ -206,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
                 schedule_keys.clone(),
                 schedule_db_pool.clone(),
                 http.clone(),
+                oracle.clone(),
                 active_jobs.clone(),
             )
             .await
