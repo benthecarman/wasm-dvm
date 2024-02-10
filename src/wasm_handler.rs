@@ -96,7 +96,8 @@ pub async fn run_wasm(file_path: PathBuf, job_params: JobParams) -> anyhow::Resu
             .map(|x| x.to_string())
     });
 
-    let sleep = tokio::time::sleep(Duration::from_millis(job_params.time));
+    // add a free second for initial start up stuff
+    let sleep = tokio::time::sleep(Duration::from_millis(job_params.time + 1_000));
 
     select! {
         result = fut => {

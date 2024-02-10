@@ -101,6 +101,18 @@ pub async fn handle_event(
         let event_id = client.send_event_builder(builder).await?;
         info!("Sent error response: {event_id}");
         return Ok(());
+    } else if params.time < 10 {
+        let builder = EventBuilder::job_feedback(
+            &event,
+            DataVendingMachineStatus::Error,
+            Some("Time must be greater than 10ms".to_string()),
+            0,
+            None,
+            None,
+        );
+        let event_id = client.send_event_builder(builder).await?;
+        info!("Sent error response: {event_id}");
+        return Ok(());
     }
 
     let value_msat = (params.time as f64 * price) as u64;
