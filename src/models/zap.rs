@@ -74,13 +74,14 @@ impl Zap {
         conn: &mut PgConnection,
         invoice: &Bolt11Invoice,
         request: &Event,
+        for_npub: &nostr::PublicKey,
     ) -> anyhow::Result<Self> {
         let new = NewZap {
             payment_hash: invoice.payment_hash().into_32().to_vec(),
             invoice: invoice.to_string(),
             amount_msats: invoice.amount_milli_satoshis().expect("Invalid amount") as i32,
             request: serde_json::to_value(request)?,
-            npub: request.pubkey.to_bytes().to_vec(),
+            npub: for_npub.to_bytes().to_vec(),
         };
 
         let res = diesel::insert_into(zaps::table)

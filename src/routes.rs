@@ -9,6 +9,7 @@ use bitcoin::secp256k1::ThirtyTwoByteHash;
 use lightning_invoice::Bolt11Invoice;
 use lnurl::pay::PayResponse;
 use lnurl::Tag;
+use nostr::nips::nip57;
 use nostr::{Event, JsonUtil};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -25,7 +26,6 @@ pub(crate) async fn get_invoice_impl(
     let desc_hash = match zap_request.as_ref() {
         None => sha256::Hash::from_str(&hash)?,
         Some(event) => {
-            // todo validate as valid zap request
             if event.kind != nostr::Kind::ZapRequest {
                 return Err(anyhow!("Invalid zap request"));
             }
@@ -44,8 +44,21 @@ pub(crate) async fn get_invoice_impl(
 
     if let Some(zap_request) = zap_request {
         let invoice = Bolt11Invoice::from_str(&resp.payment_request)?;
+
+        // handle private zaps, fixme this won't actually work yet
+        let private_zap = nip57::decrypt_private_zap_message(
+            state.keys.secret_key().unwrap(),
+            &zap_request.pubkey,
+            &zap_request,
+        )
+        .ok()
+        .map(|e| e.pubkey);
+
+        // if it is a private zap, use that npub, otherwise use the pubkey from the zap request
+        let for_npub = private_zap.unwrap_or(zap_request.pubkey);
+
         let mut conn = state.db_pool.get()?;
-        create_zap(&mut conn, &invoice, &zap_request)?;
+        create_zap(&mut conn, &invoice, &zap_request, for_npub)?;
     }
 
     Ok(resp.payment_request)

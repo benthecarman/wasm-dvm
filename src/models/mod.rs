@@ -32,14 +32,15 @@ pub fn create_zap(
     conn: &mut PgConnection,
     invoice: &Bolt11Invoice,
     request: &Event,
+    for_npub: nostr::PublicKey,
 ) -> anyhow::Result<Zap> {
     conn.transaction(|conn| {
-        let bal = ZapBalance::get(conn, &request.pubkey)?;
+        let bal = ZapBalance::get(conn, &for_npub)?;
         if bal.is_none() {
-            ZapBalance::create(conn, request.pubkey)?;
+            ZapBalance::create(conn, for_npub)?;
         }
 
-        Zap::create(conn, invoice, request)
+        Zap::create(conn, invoice, request, &for_npub)
     })
 }
 
