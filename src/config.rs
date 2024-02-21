@@ -1,11 +1,11 @@
 use clap::Parser;
 use nostr::bitcoin::Network;
-use nostr::key::SecretKey;
 use nostr::{Event, Keys};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, author, about)]
@@ -95,7 +95,7 @@ pub fn default_macaroon_file(network: &Network) -> String {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerKeys {
-    server_key: SecretKey,
+    server_key: String,
     pub kind0: Option<Event>,
     pub kind31990: Option<Event>,
 }
@@ -105,14 +105,14 @@ impl ServerKeys {
         let server_key = Keys::generate();
 
         ServerKeys {
-            server_key: server_key.secret_key().unwrap(),
+            server_key: server_key.secret_key().unwrap().to_secret_hex(),
             kind0: None,
             kind31990: None,
         }
     }
 
     pub fn keys(&self) -> Keys {
-        Keys::new(self.server_key)
+        Keys::from_str(&self.server_key).unwrap()
     }
 
     pub fn get_keys(path: &PathBuf) -> ServerKeys {

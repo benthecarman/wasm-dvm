@@ -1,5 +1,4 @@
 use crate::models::schema::zaps;
-use bitcoin::key::XOnlyPublicKey;
 use bitcoin::secp256k1::ThirtyTwoByteHash;
 use diesel::{
     AsChangeset, ExpressionMethods, Identifiable, Insertable, OptionalExtension, PgConnection,
@@ -61,8 +60,8 @@ impl Zap {
         serde_json::from_value(self.request.clone()).expect("Invalid event")
     }
 
-    pub fn npub(&self) -> XOnlyPublicKey {
-        XOnlyPublicKey::from_slice(&self.npub).expect("Invalid key")
+    pub fn npub(&self) -> nostr::PublicKey {
+        nostr::PublicKey::from_slice(&self.npub).expect("Invalid key")
     }
 
     pub fn note_id(&self) -> Option<EventId> {
@@ -81,7 +80,7 @@ impl Zap {
             invoice: invoice.to_string(),
             amount_msats: invoice.amount_milli_satoshis().expect("Invalid amount") as i32,
             request: serde_json::to_value(request)?,
-            npub: request.pubkey.serialize().to_vec(),
+            npub: request.pubkey.to_bytes().to_vec(),
         };
 
         let res = diesel::insert_into(zaps::table)

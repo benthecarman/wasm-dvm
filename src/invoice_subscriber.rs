@@ -199,16 +199,9 @@ pub async fn run_job_request(
                 Tag::Request(event.clone()),
             ];
 
-            if event
-                .tags
-                .iter()
-                .any(|t| t.kind().to_string() == "encrypted")
-            {
-                tags.push(Tag::Generic(
-                    TagKind::Custom("encrypted".to_string()),
-                    vec![],
-                ));
-                let encrypted = nip04::encrypt(&keys.secret_key()?, &event.pubkey, result)?;
+            if event.tags.iter().any(|t| matches!(t, Tag::Encrypted)) {
+                tags.push(Tag::Encrypted);
+                let encrypted = nip04::encrypt(keys.secret_key()?, &event.pubkey, result)?;
                 Ok(EventBuilder::new(Kind::JobResult(6600), encrypted, tags))
             } else {
                 Ok(EventBuilder::new(Kind::JobResult(6600), result, tags))
