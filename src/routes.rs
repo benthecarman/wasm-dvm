@@ -45,10 +45,9 @@ pub(crate) async fn get_invoice_impl(
     if let Some(zap_request) = zap_request {
         let invoice = Bolt11Invoice::from_str(&resp.payment_request)?;
 
-        // handle private zaps, fixme this won't actually work yet
-        let private_zap = nip57::decrypt_private_zap_message(
+        // handle private zaps
+        let private_zap = nip57::decrypt_received_private_zap_message(
             state.keys.secret_key().unwrap(),
-            &zap_request.pubkey,
             &zap_request,
         )
         .ok()

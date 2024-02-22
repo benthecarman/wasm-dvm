@@ -18,7 +18,7 @@ diesel = { version = "2.1", features = ["postgres", "r2d2", "chrono", "numeric",
 diesel_migrations = "2.1.0"
 home = "0.5.9"
 hex = "0.4.3"
-nostr = "0.28.0"
+nostr = "=0.28.0"
 nostr-sdk = "0.28.0"
 serde = "1.0"
 serde_json = "1.0"
@@ -31,3 +31,7 @@ extism = "1.0.3"
 tonic_openssl_lnd = "0.2.0"
 sha2 = "0.10.8"
 kormir = { version = "0.1.9", features = ["nostr"] }
+
+# needed until next release of nostr
+[patch.crates-io]
+nostr = { git = 'https://github.com/benthecarman/nostr.git', rev = "62f4832808d2995e4695e36169aa5e2b80dea1e2" }
