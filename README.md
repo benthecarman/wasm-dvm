@@ -13,8 +13,8 @@ PDK for developing and testing your wasm code.
 - [x] Pay per time execution
 - [x] Pre-paid execution with zaps
 - [x] Encrypted input and output
-- [ ] Scheduled execution
-- [ ] DLC announcement based execution
+- [x] Scheduled execution
+- [x] DLC announcement based execution
 
 ## Nostr Events
 
@@ -30,6 +30,11 @@ The input should be a stringified JSON object with the following fields:
 - `input` (string): The input data for the function.
 - `time` (number): The maximum time in milliseconds to execute the function.
 - `checksum` (string): The sha256 hash of the Wasm binary in hex.
+- `shedule` (object): Scheduling parameters for the execution. The object should have the following fields:
+    - `run_date` (number): The date in seconds since the epoch to execute the function.
+    - `name` (optional string): Name of the event. Only used for DLC announcement
+    - `expected_outputs` (optional string array): The list of expected outputs from the function. Only used for DLC
+      announcement.
 
 ### Output
 
