@@ -137,7 +137,7 @@ pub async fn get_lnurl_pay(
 pub async fn get_nip05(
     Extension(state): Extension<State>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let npub = state.keys.public_key().to_string();
+    let npub = state.keys.public_key().to_hex();
     let json = json!({
     "names": {
         "_": npub,
